@@ -72,7 +72,7 @@ def note_to_midi(note):
     return WHITE_KEYS[note.upper()]
 
 def midi_to_note(pitch):
-    return INVERSE_PITCHES[pitch.upper()]
+    return INVERSE_PITCHES[pitch]
 
 class Chord(object):
 
