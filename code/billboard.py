@@ -1,3 +1,4 @@
+import cPickle
 import os
 import numpy as np
 import simplejson as json
@@ -9,6 +10,10 @@ from chords import Chord
 Bar = namedtuple('Bar', ['start', 'end'])
 Batch = namedtuple('Batch', ['features', 'targets'])
 Datasets = namedtuple('Datasets', ['train', 'test', 'validation'])
+TimedFeature = namedtuple('TimedFeature', ['start', 'end', 'feature'])
+
+CHROMAGRAM = 'chromagram'
+CQT = 'cqt'
 
 class Beat(object):
     def __init__(self, chord=None, start=None, end=None):
@@ -27,14 +32,20 @@ class Beat(object):
                 'start': self.start,
                 'end': self.end}
 
-def chord_per_beat(chord_lines, analysis):
+def chord_per_beat(chord_lines, analysis, half_beat=True):
 
     beats = []
     beats_json = analysis['beats']
     for beat_json in beats_json:
         start = beat_json['start']
-        end = beat_json['duration'] + start
-        beats.append(Beat(start=start, end=end))
+        duration = beat_json['duration']
+        end = start + duration
+        if half_beat:
+            half_start = start + duration / 2
+            beats.append(Beat(start=start, end=half_start))
+            beats.append(Beat(start=half_start, end=end))
+        else:
+            beats.append(Beat(start=start, end=end))
 
     chords = []
     for line in chord_lines:
@@ -80,7 +91,7 @@ def beat_align(beats, spans, average=False):
         total_length = beat.end - beat.start
         for length, data in beat_spans:
             if average:
-                aligned_data += (np.array(data) * float(length) / total_length)
+                aligned_data += (data * float(length) / total_length)
             else:
                 if length > max_length:
                     max_length = length
@@ -90,33 +101,51 @@ def beat_align(beats, spans, average=False):
 
     return aligned
         
-def read_track(index, billboard_path):
-    with open(os.path.join(billboard_path, '%s/majmin.lab' % index)) as f:
+def mcgill_path(billboard_path, *args):
+    return os.path.join(billboard_path, 'mcgill', *args)
+
+def read_track(index, billboard_path, feature_type):
+    with open(mcgill_path(billboard_path, index, 'majmin.lab')) as f:
         chord_lines = f.readlines()
-    with open(os.path.join(billboard_path, '%s/echonest.json' % index)) as f:
-        analysis = json.load(f)
+    analysis = read_analysis(index, billboard_path)
+    if feature_type == CHROMAGRAM:
+        timed_features = read_timed_chromagram(index, billboard_path, analysis)
+    elif feature_type == CQT:
+        timed_features = read_timed_cqt(index, billboard_path)
     beats = chord_per_beat(chord_lines, analysis)
     bars = [Bar(b['start'], b['start'] + b['duration']) for b in analysis['bars']]
 
-    timed_chromagrams = [(s['start'], s['start'] + s['duration'], s['pitches'])
-                         for s in analysis['segments']]
-    aligned_chromagrams = np.array(beat_align(beats, timed_chromagrams, average=True))
+    aligned_features = np.array(beat_align(beats, timed_features, average=True))
 
-    return aligned_chromagrams, beats, bars
+    return aligned_features, beats, bars
 
-# all_chords = {k: [Chord.from_number(c.get_number()) for c in cs] for k, cs in all_chords.iteritems()} # if chords.py change
-def read_all_chords(billboard_path):
-    all_chords = {}
-    master_index = get_master_index(billboard_path)
-    for i, index in enumerate(master_index):
-        if i % 50 == 0:
-            print '%d/%d' % (i, len(master_index))
-        _, beats, _ = read_track(index, billboard_path)
-        all_chords[index] = [b.chord for b in beats]
-    return all_chords
+def read_analysis(index, billboard_path):
+    with open(mcgill_path(billboard_path, index, 'echonest.json')) as f:
+        return json.load(f)
 
-def join_chromagrams_beat_numbers(chromas, beats, bars):
-    data = np.hstack((chromas, np.zeros((len(chromas), 5))))
+def read_timed_chromagram(index, billboard_path, analysis):
+    if not analysis:
+        analysis = read_analysis(index, billboard_path)
+    return [TimedFeature(s['start'], s['start'] + s['duration'], np.array(s['pitches']))
+            for s in analysis['segments']]
+    
+def read_timed_cqt(index, billboard_path):
+    with open(os.path.join(billboard_path, 'cqt-hpss', '%s.json' % index)) as f:
+        cqt = json.load(f)
+
+    timed_cqts = []
+    prev = None
+    for frame in cqt:
+        if prev:
+            timed_cqts.append(TimedFeature(
+                prev['time'], frame['time'], np.array(prev['data'])))
+        prev = frame
+    # lost the last frame, whatever, too lazy to invent a duration
+
+    return timed_cqts
+
+def join_features_beat_numbers(features, beats, bars):
+    numbers = np.zeros((len(features), 5))
     bar_i = 0
     beat_number = 0
     for i, beat in enumerate(beats):
@@ -124,9 +153,9 @@ def join_chromagrams_beat_numbers(chromas, beats, bars):
             bar_i += 1
             beat_number = 0
         if beat_number < 5:
-            data[i, 12 + beat_number] = 1
+            numbers[i, beat_number] = 1
             beat_number += 1
-    return data
+    return np.hstack((features, numbers))
 
 def one_hot_encode(labels, num_labels):
     encoded = np.zeros((len(labels), num_labels))
@@ -135,22 +164,33 @@ def one_hot_encode(labels, num_labels):
 
 class Dataset(object):
 
-    def __init__(self, billboard_path, indices, num_features=12 + 5, num_labels=26):
+    def __init__(self, billboard_path, indices, 
+                 feature_type='chromagram', num_labels=26,
+                 include_beat_numbers=True):
+
         self.billboard_path = billboard_path
         self.indices = indices
-        self.num_features = num_features
         self.num_labels = num_labels
+        self.feature_type = feature_type
+
+        if feature_type == 'chromagram':
+            self.num_features = 12
+        elif feature_type == 'cqt':
+            self.num_features = 84
+        if include_beat_numbers:
+            self.num_features += 5
+
         self.track_pointer = 0
         self.beat_pointer = 0
-        self.current_chroma_cache = None
+        self.current_feature_cache = None
         self.current_labels_cache = None
 
     def randomize_indices(self):
         random.shuffle(self.indices)
 
     def read_ground_truth(self, index):
-        chromagrams, beats, bars = read_track(index, self.billboard_path)
-        inputs = join_chromagrams_beat_numbers(chromagrams, beats, bars)
+        features, beats, bars = read_track(index, self.billboard_path, self.feature_type)
+        inputs = join_features_beat_numbers(features, beats, bars)
         classes = np.array([b.chord.get_number() for b in beats])
         return inputs, classes
 
@@ -160,37 +200,37 @@ class Dataset(object):
     def get_ground_truth(self, index):
         raise NotImplementedError()
 
-    def get_current_chroma(self):
-        if self.current_chroma_cache is not None:
-            return self.current_chroma_cache
+    def get_current_feature(self):
+        if self.current_feature_cache is not None:
+            return self.current_feature_cache
         index = self.indices[self.track_pointer]
-        self.current_chroma_cache, self.current_labels_cache = self.get_ground_truth(index)
-        return self.current_chroma_cache
+        self.current_feature_cache, self.current_labels_cache = self.get_ground_truth(index)
+        return self.current_feature_cache
 
     def get_current_labels(self):
         return self.current_labels_cache
 
-    def get_next_chroma(self):
+    def get_next_feature(self):
         if not self.has_next_batch():
             self.track_pointer = 0
-            self.randomize_indices()
+            #self.randomize_indices()
         self.beat_pointer = 0
-        self.current_chroma_cache = None
+        self.current_feature_cache = None
         self.current_labels_cache = None
-        self.current_chroma_cache = self.get_current_chroma()
+        self.current_feature_cache = self.get_current_feature()
         self.current_labels_cache = self.get_current_labels()
         self.track_pointer += 1
-        return self.get_current_chroma()
+        return self.get_current_feature()
 
     def next_patch(self, steps, hop):
-        chroma = self.get_current_chroma()
-        chroma_patch = chroma[self.get_patch_slice(steps)]
-        while len(chroma_patch) < steps:
-            chroma = self.get_next_chroma()
-            chroma_patch = chroma[self.get_patch_slice(steps)]
+        feature = self.get_current_feature()
+        feature_patch = feature[self.get_patch_slice(steps)]
+        while len(feature_patch) < steps:
+            feature = self.get_next_feature()
+            feature_patch = feature[self.get_patch_slice(steps)]
         labels_patch = self.get_current_labels()[self.get_patch_slice(steps)]
         self.beat_pointer += hop
-        return chroma_patch, labels_patch
+        return feature_patch, labels_patch
 
     def has_next_batch(self):
         return self.track_pointer < len(self.indices)
@@ -209,7 +249,7 @@ class Dataset(object):
     def all_batches(self, steps, hop, batch_size):
         self.beat_pointer = 0
         self.track_pointer = 0
-        self.current_chroma_cache = None
+        self.current_feature_cache = None
         self.current_labels_cache = None
 
         previous_pointer = 0
@@ -224,9 +264,8 @@ class OnDiskDataset(Dataset):
 
 class InMemoryDataset(Dataset):
 
-    def __init__(self, billboard_path, indices, num_features=12 + 5, num_labels=26):
-        super(InMemoryDataset, self).__init__(
-            billboard_path, indices, num_features, num_labels)
+    def __init__(self, *args, **kwargs):
+        super(InMemoryDataset, self).__init__(*args, **kwargs)
             
         self.all_features = {}
         self.all_labels = {}
@@ -248,13 +287,17 @@ class InMemoryDataset(Dataset):
         return self.next_batch(steps, hop, self.num_batches(steps, hop))
 
 def get_master_index(billboard_path):
-    with open(os.path.join(billboard_path, 'index')) as f:
+    with open(mcgill_path(billboard_path, 'index')) as f:
         master_index = [i.strip() for i in f.readlines()]
     return master_index
 
-def read_datasets(billboard_path, test_fraction=0.25, validation_fraction=0.25):
+def read_datasets(billboard_path, test_fraction=0.25, validation_fraction=0.25,
+                  feature_type='chromagram', subset=None):
     indices = get_master_index(billboard_path)
     #random.shuffle(indices)
+
+    if subset is not None:
+        indices = indices[:subset]
 
     size = len(indices)
     test_size = int(size * test_fraction)
@@ -266,7 +309,15 @@ def read_datasets(billboard_path, test_fraction=0.25, validation_fraction=0.25):
     validation_indices = indices[train_size + test_size:size]
 
     return Datasets(
-        train=InMemoryDataset(billboard_path, train_indices),
-        test=InMemoryDataset(billboard_path, test_indices),
-        validation=InMemoryDataset(billboard_path, validation_indices),
+        train=InMemoryDataset(billboard_path, train_indices, feature_type),
+        test=InMemoryDataset(billboard_path, test_indices, feature_type),
+        validation=InMemoryDataset(billboard_path, validation_indices, feature_type),
     )
+
+def dump_datasets(datasets, filename):
+    with open(filename, 'w') as f:
+        cPickle.dump(datasets, f, protocol=cPickle.HIGHEST_PROTOCOL)
+
+def load_datasets(filename):
+    with open(filename) as f:
+        return cPickle.load(f)

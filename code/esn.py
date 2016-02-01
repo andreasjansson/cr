@@ -8,11 +8,11 @@ from tensorflow.python.ops import control_flow_ops
 
 import billboard
 
-# TODO: try maxpooling in beat alignment
+# TODO: bidirectional esn
 
 # TODO: remove
 if 'sess' in globals():
-    ops.reset_default_graph()
+    tf.ops.reset_default_graph()
     sess = tf.InteractiveSession()
 
 if not 'flags' in globals():
@@ -25,15 +25,14 @@ class EchoStateNetwork(object):
 
     def __init__(
             self,
-            n_inputs=17,
-            n_hidden=100,
+            n_inputs=84,# + 5,
+            n_hidden=1000,
             n_outputs=26,
-            n_steps=200,
+            n_steps=400,
             spectral_radius=1.0,
-            connectivity=0.05,
+            connectivity=0.005,
             min_leakage=0.0,
             max_leakage=0.99,
-            feedback=0.0,
             ridge_beta=0.0,
             iter_learning_rate=0.05,
             input_scaling=0.4,
@@ -47,7 +46,6 @@ class EchoStateNetwork(object):
         self.connectivity = connectivity
         self.min_leakage = min_leakage
         self.max_leakage = max_leakage
-        self.feedback = feedback
         self.ridge_beta = ridge_beta
         self.iter_learning_rate = iter_learning_rate
         self.input_scaling = input_scaling
@@ -82,9 +80,6 @@ class EchoStateNetworkNumPy(EchoStateNetwork):
     def __init__(self, *args, **kwargs):
         super(EchoStateNetworkNumPy, self).__init__(*args, **kwargs)
 
-        if self.feedback > 0:
-            raise NotImplementedError('no feedback yet')
-    
         self.w_xh = np.random.uniform(-.5, .5, [self.n_inputs, self.n_hidden])
         self.w_hh = self.generate_hh_weights()
         self.w_hy = np.zeros([self.n_hidden, self.n_outputs])
@@ -126,6 +121,56 @@ class EchoStateNetworkNumPy(EchoStateNetwork):
         return np.mean(correct)
 
 
+class Direction(object):
+
+    def __init__(self, esn, backwards=False):
+        self.esn = esn
+        self.backwards = backwards
+
+        self.w_xh = tf.Variable(
+            tf.random_uniform([esn.n_inputs, esn.n_hidden], -.5, .5),
+            name='w_xh', trainable=False)
+
+        self.w_hh = tf.Variable(
+            tf.constant(
+                esn.generate_hh_weights().todense(), dtype='float32', name='w_hh'),
+            name='w_hh', trainable=False)
+
+        self.leakage = tf.reshape(
+            tf.linspace(esn.min_leakage, esn.max_leakage, esn.n_hidden),
+            [1, esn.n_hidden], name='leakage')
+
+    def compute_states(self):
+        states_list = []
+        state = self.zero_state()
+
+        timesteps = xrange(self.esn.n_steps)
+        if self.backwards:
+            timesteps = reversed(timesteps)
+
+        for i in timesteps:
+            prev_state = state
+
+            state = (tf.matmul(self.esn.x[:, i, :], self.w_xh) +
+                     tf.matmul(prev_state, self.w_hh, b_is_sparse=True))
+
+            state = (1 - self.leakage) * tf.tanh(state) + self.leakage * prev_state
+
+            states_list.append(state)
+
+        states = tf.reshape(tf.concat(
+            1, states_list), [-1, self.esn.n_steps, self.esn.n_hidden])
+
+        if self.backwards:
+            states = tf.reverse(states, [False, True, False])
+
+        return states
+
+    def zero_state(self):
+        shape = tf.pack([self.esn.batch_size(), self.esn.n_hidden])
+        return tf.cast(tf.fill(shape, 0), 'float32')
+
+
 class EchoStateNetworkTensorFlow(EchoStateNetwork):
 
     def __init__(self, *args, **kwargs):
@@ -134,57 +179,22 @@ class EchoStateNetworkTensorFlow(EchoStateNetwork):
         self.x = tf.placeholder('float32', [None, self.n_steps, self.n_inputs], name='x')
         self.targets = tf.placeholder(
             'float32', [None, self.n_steps, self.n_outputs], name='targets')
-        self.is_training = tf.placeholder('bool', name='is_training')
+        self.w_hy = tf.Variable(
+            tf.random_uniform([self.n_hidden * 2, self.n_outputs], -.5, .5), name='w_hy')
 
         self.shifted_x = self.x * self.input_scaling + self.input_shift
 
-        self.w_xh = tf.Variable(
-            tf.random_uniform([self.n_inputs, self.n_hidden], -.5, .5),
-            name='w_xh', trainable=False)
+        self.forward = Direction(self)
+        self.backward = Direction(self, backwards=True)
 
-        self.w_hh = tf.Variable(
-            tf.constant(
-                self.generate_hh_weights().todense(), dtype='float32', name='w_hh'),
-            name='w_hh', trainable=False)
+        self.forward_states = self.forward.compute_states()
+        self.backward_states = self.backward.compute_states()
 
-        self.w_yh = tf.Variable(
-            tf.random_uniform([self.n_outputs, self.n_hidden], -.5, .5) * self.feedback,
-            name='w_yh', trainable=False)
-
-        self.w_hy = tf.Variable(
-            tf.random_uniform([self.n_hidden, self.n_outputs], -.5, .5), name='w_hy')
-
-        self.leakage = tf.reshape(
-            tf.linspace(self.min_leakage, self.max_leakage, self.n_hidden),
-            [1, self.n_hidden], name='leakage')
-
-        states = []
-        state = self.zero_state()
-        for i in range(self.n_steps):
-            prev_state = state
-
-            state = (tf.matmul(self.x[:, i, :], self.w_xh) +
-                     tf.matmul(prev_state, self.w_hh, b_is_sparse=True))
-
-            if self.feedback > 0:
-                teacher_y = self.targets[:, max(0, i - 1), :]
-                feedback_y = tf.nn.softmax(tf.matmul(prev_state, self.w_hy))
-                y = control_flow_ops.cond(
-                    self.is_training,
-                    lambda: teacher_y,
-                    lambda: feedback_y
-                )
-                state += tf.matmul(y, self.w_yh)
-
-            state = (1 - self.leakage) * tf.tanh(state) + self.leakage * prev_state
-
-            states.append(state)
-
-        self.states = tf.reshape(tf.concat(1, states), [-1, self.n_steps, self.n_hidden])
+        self.states = tf.concat(2, [self.forward_states, self.backward_states])
 
         self.y = tf.reshape(
             tf.nn.softmax(
-                tf.matmul(tf.reshape(self.states, [-1, self.n_hidden]), self.w_hy)),
+                tf.matmul(tf.reshape(self.states, [-1, self.n_hidden * 2]), self.w_hy)),
             [-1, self.n_steps, self.n_outputs]
         )
 
@@ -201,15 +211,11 @@ class EchoStateNetworkTensorFlow(EchoStateNetwork):
         correct = tf.equal(self.predicted, actual)
         self.accuracy = tf.reduce_mean(tf.cast(correct, 'float'))
 
-    def zero_state(self):
-        shape = tf.pack([self.batch_size(), self.n_hidden])
-        return tf.cast(tf.fill(shape, 0), 'float32')
-
     def batch_size(self):
         return tf.shape(self.x)[0]
 
     def make_train_tf(self):
-        x = tf.reshape(self.states, [-1, self.n_hidden])
+        x = tf.reshape(self.states, [-1, self.n_hidden * 2])
         y = tf.reshape(self.targets, [-1, self.n_outputs])
 
         indices = tf.random_shuffle(tf.range(tf.shape(x)[0]))
@@ -218,15 +224,15 @@ class EchoStateNetworkTensorFlow(EchoStateNetwork):
 
         r = tf.matmul(tf.transpose(x_), x_)
         p = tf.matmul(tf.transpose(x_), y_)
-        i = tf.diag(tf.ones([self.n_hidden]))
+        i = tf.diag(tf.ones([self.n_hidden * 2]))
         w = tf.matmul(tf.matrix_inverse(r + self.ridge_beta * i), p)
 
         return tf.assign(self.w_hy, w)
 
-    def train(self, states, targets):
+    def train_np(self, states, targets):
         states = np.reshape(states, [-1, self.n_hidden])
-        targets = np.reshape(targets, [-1, self.n_targets])
-        weights = ridge_regression(states, outputs, self.ridge_beta)
+        targets = np.reshape(targets, [-1, self.n_outputs])
+        weights = ridge_regression(states, targets, self.ridge_beta)
         return tf.assign(self.w_hy, weights)
 
 def ridge_regression(x, y, beta):
@@ -250,11 +256,11 @@ def train_tf():
     n_steps = esn.n_steps
     n_hop = n_steps // 2
     train_batch = datasets.train.single_batch(n_steps, n_hop)
-    sess.run(esn.train_tf, {esn.x: train_batch.features, esn.targets:
-                              train_batch.targets})
+    sess.run(esn.train_tf, {esn.x: train_batch.features[:, :, :84],
+                            esn.targets: train_batch.targets})
 
     test_batch = datasets.test.single_batch(n_steps, n_hop)
-    accuracy = sess.run(esn.accuracy, {esn.x: test_batch.features,
+    accuracy = sess.run(esn.accuracy, {esn.x: test_batch.features[:, :, :84],
                                        esn.targets: test_batch.targets})
     return accuracy, train_batch, test_batch
 
@@ -268,12 +274,19 @@ def train_np():
     accuracy = esn.accuracy(test_batch.features, test_batch.targets)
 
     return accuracy, train_batch, test_batch
-    
+
+def impulse_demo(esn):
+    x = np.zeros([1, esn.n_steps, esn.n_inputs])
+    x[:, :1, :] = x[:, -1:, :] = 1
+    return sess.run(esn.states, {esn.x: x})[0]    
 
 def main(unused_args):
     require_flag('billboard_path')
 
     print 'Reading datasets... '
+    cache_filename = 'datasets.cpkl'
+    if os.path.exists(cache_filename):
+        datasets = load_datasets(cache_filename)
     datasets = billboard.read_datasets(FLAGS.billboard_path)
 
     grid = {
