@@ -26,6 +26,8 @@ flags.DEFINE_integer('conv_patch_height', 16, 'Convolution patch height')
 flags.DEFINE_integer('conv_patches', 16, 'Number of convolution patches')
 flags.DEFINE_integer('clip_gradient', 5, 'Max gradient norm')
 
+# TODO: reshape inputs to be [batch_size, steps, num_features]
+
 class ChordRecModel(object):
 
     def __init__(self):

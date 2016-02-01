@@ -80,7 +80,7 @@ def beat_align(beats, spans, average=False):
         total_length = beat.end - beat.start
         for length, data in beat_spans:
             if average:
-                aligned_data += (data * float(length) / total_length)
+                aligned_data += (np.array(data) * float(length) / total_length)
             else:
                 if length > max_length:
                     max_length = length
@@ -100,7 +100,7 @@ def read_track(index, billboard_path):
 
     timed_chromagrams = [(s['start'], s['start'] + s['duration'], s['pitches'])
                          for s in analysis['segments']]
-    aligned_chromagrams = np.array(beat_align(beats, timed_chromagrams))
+    aligned_chromagrams = np.array(beat_align(beats, timed_chromagrams, average=True))
 
     return aligned_chromagrams, beats, bars
 
@@ -196,13 +196,13 @@ class Dataset(object):
         return self.track_pointer < len(self.indices)
 
     def next_batch(self, steps, hop, batch_size):
-        features_batch = np.zeros((steps, batch_size, self.num_features))
-        targets_batch = np.zeros((steps, batch_size, self.num_labels))
+        features_batch = np.zeros((batch_size, steps, self.num_features))
+        targets_batch = np.zeros((batch_size, steps, self.num_labels))
 
         for i in range(batch_size):
             features, labels = self.next_patch(steps, hop)
-            features_batch[:steps, i, :] = features
-            targets_batch[:steps, i, :] = one_hot_encode(labels, self.num_labels)
+            features_batch[i, :, :] = features
+            targets_batch[i, :, :] = one_hot_encode(labels, self.num_labels)
 
         return Batch(features_batch, targets_batch)
 
@@ -254,7 +254,7 @@ def get_master_index(billboard_path):
 
 def read_datasets(billboard_path, test_fraction=0.25, validation_fraction=0.25):
     indices = get_master_index(billboard_path)
-    random.shuffle(indices)
+    #random.shuffle(indices)
 
     size = len(indices)
     test_size = int(size * test_fraction)

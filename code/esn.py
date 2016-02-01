@@ -1,29 +1,43 @@
+from itertools import izip, product
+from scipy.stats import mode
 import numpy as np
 import scipy.sparse
 import scipy.sparse.linalg
 import tensorflow as tf
-import numpy as np
+from tensorflow.python.ops import control_flow_ops
+
+import billboard
+
+# TODO: try maxpooling in beat alignment
 
 # TODO: remove
-#ops.reset_default_graph()
-#sess = tf.InteractiveSession()
+if 'sess' in globals():
+    ops.reset_default_graph()
+    sess = tf.InteractiveSession()
+
+if not 'flags' in globals():
+    flags = tf.flags
+    FLAGS = flags.FLAGS
+    flags.DEFINE_string('billboard_path', None, 'Path to McGill/Billboard ground truth files')
+    flags.DEFINE_string('backend', 'tensorflow', 'numpy/tensorflow')
 
 class EchoStateNetwork(object):
 
     def __init__(
             self,
-            n_inputs=4,
-            n_hidden=50,
-            n_outputs=2,
-            n_steps=1000,
-            #spectral_radius=1.0,
-            spectral_radius=1.3,
-            connectivity=0.1,
+            n_inputs=17,
+            n_hidden=100,
+            n_outputs=26,
+            n_steps=200,
+            spectral_radius=1.0,
+            connectivity=0.05,
             min_leakage=0.0,
-            max_leakage=1.0,
+            max_leakage=0.99,
             feedback=0.0,
             ridge_beta=0.0,
-            iter_learning_rate=0.01
+            iter_learning_rate=0.05,
+            input_scaling=0.4,
+            input_shift=-0.2,
     ):
         self.n_inputs = n_inputs
         self.n_hidden = n_hidden
@@ -31,69 +45,13 @@ class EchoStateNetwork(object):
         self.n_steps = n_steps
         self.spectral_radius = spectral_radius
         self.connectivity = connectivity
+        self.min_leakage = min_leakage
+        self.max_leakage = max_leakage
         self.feedback = feedback
         self.ridge_beta = ridge_beta
         self.iter_learning_rate = iter_learning_rate
-        
-        self.x = tf.placeholder('float', [None, n_steps, n_inputs], name='x')
-        self.y = tf.placeholder('float', [None, n_steps, n_outputs], name='y')
-
-        self.w_xh = tf.Variable(
-            tf.random_uniform([self.n_inputs, self.n_hidden], -.5, .5),
-            name='w_xh', trainable=False)
-
-        self.w_hh = tf.Variable(
-            self.generate_hh_weights(),
-            name='w_hh', trainable=False)
-
-        self.w_yh = tf.Variable(
-            tf.random_uniform([self.n_outputs, self.n_hidden], -.5, .5) * self.feedback,
-            name='w_yh', trainable=False)
-
-        self.w_hy = tf.Variable(
-            tf.random_uniform([self.n_hidden, self.n_outputs], -.5, .5), name='w_hy')
-
-        self.leakage = tf.Variable(
-            tf.random_uniform([1, self.n_hidden], min_leakage, max_leakage),
-            name='leakage', trainable=False)
-
-        states = []
-        state = self.zero_state()
-        for i in range(n_steps):
-            prev_state = state
-            state = tf.tanh(tf.matmul(self.x[:, i, :], self.w_xh) +
-                            tf.matmul(prev_state, self.w_hh) +
-                            tf.matmul(self.y[:, i, :], self.w_yh))
-            leaked_state = self.leakage * state + (1 - self.leakage) * prev_state
-            states.append(leaked_state)
-        self.states = tf.reshape(tf.concat(1, states), [-1, n_steps, n_hidden])
-
-        self.y_ = tf.reshape(
-            tf.nn.softmax(
-                tf.matmul(tf.reshape(self.states, [-1, n_hidden]), self.w_hy)),
-            [-1, n_steps, n_outputs]
-        )
-
-        self.cost = -tf.reduce_sum(self.y * tf.log(self.y_))
-
-        # self.y_ = tf.reshape(
-        #     tf.matmul(tf.reshape(self.states, [-1, n_hidden]), self.w_hy),
-        #     [-1, n_steps, n_outputs])
-        
-        #cost = tf.reduce_mean(tf.pow(self.y - self.y_, 2))
-
-        tvars = tf.trainable_variables()
-        grads, _ = tf.clip_by_global_norm(tf.gradients(self.cost, tvars), 5)
-        self.train_iter = tf.train.GradientDescentOptimizer(iter_learning_rate).apply_gradients(zip(grads, tvars))
-        
-        #self.train_iter = tf.train.GradientDescentOptimizer(iter_learning_rate).minimize(self.cost)
-
-    def zero_state(self):
-        shape = tf.pack([self.batch_size(), self.n_hidden])
-        return tf.cast(tf.fill(shape, 0), 'float32')
-
-    def batch_size(self):
-        return tf.shape(self.x)[0]
+        self.input_scaling = input_scaling
+        self.input_shift = input_shift
 
     def generate_hh_weights(self):
         # in numpy for now
@@ -116,12 +74,158 @@ class EchoStateNetwork(object):
         weights /= radius
         weights *= self.spectral_radius
 
-        # no matmul for sparse matrices in tensorflow yet
-        return tf.constant(weights.todense(), dtype='float32', name='w_hh')
+        return weights
 
-    def train(self, states, outputs):
+
+class EchoStateNetworkNumPy(EchoStateNetwork):
+
+    def __init__(self, *args, **kwargs):
+        super(EchoStateNetworkNumPy, self).__init__(*args, **kwargs)
+
+        if self.feedback > 0:
+            raise NotImplementedError('no feedback yet')
+    
+        self.w_xh = np.random.uniform(-.5, .5, [self.n_inputs, self.n_hidden])
+        self.w_hh = self.generate_hh_weights()
+        self.w_hy = np.zeros([self.n_hidden, self.n_outputs])
+
+        self.leakage = np.linspace(
+            self.min_leakage, self.max_leakage, self.n_hidden).reshape([1, self.n_hidden])
+
+    def states(self, features):
+        states = []
+        state = np.zeros([features.shape[0], self.n_hidden])
+        for i in range(self.n_steps):
+            prev_state = state
+            state = np.tanh(features[:, i, :].dot(self.w_xh) +
+                            self.w_hh.dot(prev_state.T).T)
+
+            state = self.leakage * prev_state + (1 - self.leakage) * state
+            states.append(state)
+
+        return np.array(states).swapaxes(0, 1)
+
+    def train(self, features, targets):
+        states = self.states(features)
         states = np.reshape(states, [-1, self.n_hidden])
-        outputs = np.reshape(outputs, [-1, self.n_outputs])
+        outputs = np.reshape(targets, [-1, self.n_outputs])
+        weights = ridge_regression(states, outputs, self.ridge_beta)
+        self.w_hy = weights
+
+    def y(self, features):
+        states = self.states(features)
+        return np.dot(
+            states.reshape([-1, self.n_hidden]),
+            self.w_hy).reshape([-1, self.n_steps, self.n_outputs])
+
+    def accuracy(self, features, targets):
+        y = self.y(features)
+        predicted = np.argmax(y, 2)
+        actual = np.argmax(targets, 2)
+        correct = predicted == actual
+        return np.mean(correct)
+
+
+class EchoStateNetworkTensorFlow(EchoStateNetwork):
+
+    def __init__(self, *args, **kwargs):
+        super(EchoStateNetworkTensorFlow, self).__init__(*args, **kwargs)
+
+        self.x = tf.placeholder('float32', [None, self.n_steps, self.n_inputs], name='x')
+        self.targets = tf.placeholder(
+            'float32', [None, self.n_steps, self.n_outputs], name='targets')
+        self.is_training = tf.placeholder('bool', name='is_training')
+
+        self.shifted_x = self.x * self.input_scaling + self.input_shift
+
+        self.w_xh = tf.Variable(
+            tf.random_uniform([self.n_inputs, self.n_hidden], -.5, .5),
+            name='w_xh', trainable=False)
+
+        self.w_hh = tf.Variable(
+            tf.constant(
+                self.generate_hh_weights().todense(), dtype='float32', name='w_hh'),
+            name='w_hh', trainable=False)
+
+        self.w_yh = tf.Variable(
+            tf.random_uniform([self.n_outputs, self.n_hidden], -.5, .5) * self.feedback,
+            name='w_yh', trainable=False)
+
+        self.w_hy = tf.Variable(
+            tf.random_uniform([self.n_hidden, self.n_outputs], -.5, .5), name='w_hy')
+
+        self.leakage = tf.reshape(
+            tf.linspace(self.min_leakage, self.max_leakage, self.n_hidden),
+            [1, self.n_hidden], name='leakage')
+
+        states = []
+        state = self.zero_state()
+        for i in range(self.n_steps):
+            prev_state = state
+
+            state = (tf.matmul(self.x[:, i, :], self.w_xh) +
+                     tf.matmul(prev_state, self.w_hh, b_is_sparse=True))
+
+            if self.feedback > 0:
+                teacher_y = self.targets[:, max(0, i - 1), :]
+                feedback_y = tf.nn.softmax(tf.matmul(prev_state, self.w_hy))
+                y = control_flow_ops.cond(
+                    self.is_training,
+                    lambda: teacher_y,
+                    lambda: feedback_y
+                )
+                state += tf.matmul(y, self.w_yh)
+
+            state = (1 - self.leakage) * tf.tanh(state) + self.leakage * prev_state
+
+            states.append(state)
+
+        self.states = tf.reshape(tf.concat(1, states), [-1, self.n_steps, self.n_hidden])
+
+        self.y = tf.reshape(
+            tf.nn.softmax(
+                tf.matmul(tf.reshape(self.states, [-1, self.n_hidden]), self.w_hy)),
+            [-1, self.n_steps, self.n_outputs]
+        )
+
+        self.cost = -tf.reduce_sum(self.targets * tf.log(self.y))
+
+        tvars = tf.trainable_variables()
+        grads, _ = tf.clip_by_global_norm(tf.gradients(self.cost, tvars), 5)
+        optimizer = tf.train.GradientDescentOptimizer(self.iter_learning_rate)
+        self.train_iter = optimizer.apply_gradients(zip(grads, tvars))
+        self.train_tf = self.make_train_tf()
+
+        self.predicted = tf.argmax(self.y, 2)
+        actual = tf.argmax(self.targets, 2)
+        correct = tf.equal(self.predicted, actual)
+        self.accuracy = tf.reduce_mean(tf.cast(correct, 'float'))
+
+    def zero_state(self):
+        shape = tf.pack([self.batch_size(), self.n_hidden])
+        return tf.cast(tf.fill(shape, 0), 'float32')
+
+    def batch_size(self):
+        return tf.shape(self.x)[0]
+
+    def make_train_tf(self):
+        x = tf.reshape(self.states, [-1, self.n_hidden])
+        y = tf.reshape(self.targets, [-1, self.n_outputs])
+
+        indices = tf.random_shuffle(tf.range(tf.shape(x)[0]))
+        x_ = tf.gather(x, indices)
+        y_ = tf.gather(y, indices)
+
+        r = tf.matmul(tf.transpose(x_), x_)
+        p = tf.matmul(tf.transpose(x_), y_)
+        i = tf.diag(tf.ones([self.n_hidden]))
+        w = tf.matmul(tf.matrix_inverse(r + self.ridge_beta * i), p)
+
+        return tf.assign(self.w_hy, w)
+
+    def train(self, states, targets):
+        states = np.reshape(states, [-1, self.n_hidden])
+        targets = np.reshape(targets, [-1, self.n_targets])
         weights = ridge_regression(states, outputs, self.ridge_beta)
         return tf.assign(self.w_hy, weights)
 
@@ -140,3 +244,112 @@ def test_esn():
     x = x.reshape([10, 1000, 4])
     y = y.reshape([10, 1000, 2])
     
+
+
+def train_tf():
+    n_steps = esn.n_steps
+    n_hop = n_steps // 2
+    train_batch = datasets.train.single_batch(n_steps, n_hop)
+    sess.run(esn.train_tf, {esn.x: train_batch.features, esn.targets:
+                              train_batch.targets})
+
+    test_batch = datasets.test.single_batch(n_steps, n_hop)
+    accuracy = sess.run(esn.accuracy, {esn.x: test_batch.features,
+                                       esn.targets: test_batch.targets})
+    return accuracy, train_batch, test_batch
+
+def train_np():
+    n_steps = esn.n_steps
+    n_hop = n_steps // 2
+    train_batch = datasets.train.single_batch(n_steps, n_hop)
+    esn.train(train_batch.features, train_batch.targets)
+
+    test_batch = datasets.test.single_batch(n_steps, n_hop)
+    accuracy = esn.accuracy(test_batch.features, test_batch.targets)
+
+    return accuracy, train_batch, test_batch
+    
+
+def main(unused_args):
+    require_flag('billboard_path')
+
+    print 'Reading datasets... '
+    datasets = billboard.read_datasets(FLAGS.billboard_path)
+
+    grid = {
+        'n_hidden': [500, 700, 900],
+        'n_steps': [200, 400],
+        'spectral_radius': [.8, 1., 1.2],
+        'connectivity': [.005, .01, .05, .1],
+        'max_leakage': [.6, .9],
+        'min_leakage': [0., .3, .6],
+        'ridge_beta': [0, .2],
+        'input_scaling': [.4, .2],
+        'input_shift': [-.2, -.1],
+    }
+    grid_product = list(dict_product(grid))
+
+    for epoch, config in enumerate(grid_product):
+
+        print '\n%s' % config
+
+        if FLAGS.backend == 'numpy':
+            numpy_epoch(datasets, config, epoch)
+        elif FLAGS.backend == 'tensorflow':
+            tensorflow_epoch(datasets, config, epoch)
+        else:
+            print 'unknown backend'
+
+def tensorflow_epoch(datasets, config, epoch):
+
+    with tf.Graph().as_default(), tf.Session() as sess:
+
+        n_steps = config['n_steps']
+        n_hop = n_steps / 2
+        train_batch = datasets.train.single_batch(n_steps, n_hop)
+        test_batch = datasets.test.single_batch(n_steps, n_hop)
+
+        ys = []
+        accuracies = []
+
+        for _ in range(5):
+            esn = EchoStateNetworkTensorFlow(**config)
+            sess.run(tf.initialize_all_variables())
+
+            sess.run(esn.train_tf, {esn.x: train_batch.features, esn.targets:
+                                      train_batch.targets})
+
+            accuracy, y = sess.run([esn.accuracy, esn.y], {
+                esn.x: test_batch.features, esn.targets: test_batch.targets})
+
+            ys.append(y)
+            accuracies.append(accuracy)
+
+        ensemble_predictions = mode(np.argmax(ys, 3), 0)[0].reshape([-1, n_steps])
+        ensemble_accuracy = np.mean(ensemble_predictions == test_batch.targets.argmax(2))
+
+        print 'ensemble accuracy: %.2f%%; mean accuracy: %.2f%%' % (
+            ensemble_accuracy * 100, np.mean(accuracies) * 100)
+
+def numpy_epoch(datasets, config, epoch):
+
+    esn = EchoStateNetworkNumPy(**config)
+
+    n_steps = config['n_steps']
+    n_hop = n_steps / 2
+    train_batch = datasets.train.single_batch(n_steps, n_hop)
+    esn.train(train_batch.features, train_batch.targets)
+
+    test_batch = datasets.test.single_batch(n_steps, n_hop)
+    accuracy = esn.accuracy(test_batch.features, test_batch.targets)
+    print 'accuracy at epoch %d: %.2f%%' % (epoch, accuracy * 100)
+
+def dict_product(d):
+    return (dict(izip(d, x)) for x in product(*d.itervalues()))
+
+def require_flag(flag_name):
+    if FLAGS.__flags[flag_name] is None:
+        raise ValueError('Must set --%s' % flag_name)
+
+if __name__ == '__main__':
+    tf.app.run()
