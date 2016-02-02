@@ -441,6 +441,7 @@ def learned_rate_np(esn, batch, states):
     targets = batch.targets
     def score(indices):
         y = np.reshape(states[:, indices].dot(esn.w_hy[indices, :]), [-1, esn.n_steps, esn.n_outputs])
+        return np.mean(targets.argmax(2) == y.argmax(2))
 
     return score(np.arange(esn.n_hidden_2 - 84)) - score(np.arange(esn.n_hidden_2 - 84, esn.n_hidden_2))
 
