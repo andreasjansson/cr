@@ -291,8 +291,8 @@ def get_master_index(billboard_path):
         master_index = [i.strip() for i in f.readlines()]
     return master_index
 
-def read_datasets(billboard_path, test_fraction=0.25, validation_fraction=0.25,
-                  feature_type='chromagram', subset=None):
+def read_datasets(billboard_path, test_fraction=0.5, validation_fraction=0,
+                  feature_type=CHROMAGRAM, subset=None):
     indices = get_master_index(billboard_path)
     #random.shuffle(indices)
 
