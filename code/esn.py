@@ -1,4 +1,4 @@
-import random
+import cPickle
 import os
 from itertools import izip, product
 from scipy.stats import mode
@@ -8,6 +8,7 @@ import scipy.sparse.linalg
 import tensorflow as tf
 
 import billboard
+from datasets import dump_datasets, load_datasets
 
 # TODO: remove
 if 'sess' in globals():
@@ -18,13 +19,14 @@ if not 'flags' in globals():
     flags = tf.flags
     FLAGS = flags.FLAGS
     flags.DEFINE_string('billboard_path', None, 'Path to McGill/Billboard ground truth files')
-    flags.DEFINE_string('backend', 'tensorflow', 'numpy/tensorflow')
+    flags.DEFINE_string('backend', 'numpy', 'numpy/tensorflow')
+    flags.DEFINE_string('feature_type', 'cqt', 'cqt/chromagram/unaligned_chromagram')
 
 class EchoStateNetwork(object):
 
     def __init__(
             self,
-            n_inputs=84,# + 5,
+            n_inputs=12,
             n_hidden=1000,
             n_outputs=26,
             n_steps=200,
@@ -66,7 +68,7 @@ class EchoStateNetwork(object):
                     scipy.sparse.linalg.ArpackError):
                 continue
         else:
-            print 'scipy.sparse.linalg failed to converge, falling back to numpy.linalg'
+            #print 'scipy.sparse.linalg failed to converge, falling back to numpy.linalg'
             eigvals = np.linalg.eigvals(weights.todense())
         radius = np.abs(np.max(eigvals))
         weights /= radius
@@ -74,13 +76,12 @@ class EchoStateNetwork(object):
 
         return weights
 
-
 class DirectionNumPy(object):
 
     def __init__(self, esn, backwards=False):
         self.esn = esn
         self.backwards = backwards
-        self.w_xh = np.random.uniform(-.5, .5, [esn.n_inputs, esn.n_hidden])
+        self.w_xh = np.random.normal(0, .2, [esn.n_inputs, esn.n_hidden])
         self.w_hh = esn.generate_hh_weights()
         self.leakage = np.linspace(
             esn.min_leakage, esn.max_leakage, esn.n_hidden).reshape([1, esn.n_hidden])
@@ -88,7 +89,6 @@ class DirectionNumPy(object):
     def compute_states(self, features):
         states_list = []
         state = np.zeros([features.shape[0], self.esn.n_hidden])
-        print 'stepping through',
 
         timesteps = xrange(self.esn.n_steps)
         if self.backwards:
@@ -96,7 +96,6 @@ class DirectionNumPy(object):
 
         for i in timesteps:
             prev_state = state
-            print '.',
             state = np.tanh(features[:, i, :].dot(self.w_xh) +
                             self.w_hh.dot(prev_state.T).T)
 
@@ -107,7 +106,6 @@ class DirectionNumPy(object):
         if self.backwards:
             states_list.reverse()
 
-        print 'swapping axes'
         return np.array(states_list).swapaxes(0, 1)
 
 class EchoStateNetworkNumPy(EchoStateNetwork):
@@ -115,38 +113,28 @@ class EchoStateNetworkNumPy(EchoStateNetwork):
     def __init__(self, *args, **kwargs):
         super(EchoStateNetworkNumPy, self).__init__(*args, **kwargs)
 
-        print 'setting up variables'
         self.forward = DirectionNumPy(self)
         self.backward = DirectionNumPy(self, backwards=True)
         self.w_hy = np.zeros([self.n_hidden_2, self.n_outputs])
 
     def states(self, features):
         scaled_features = features * self.input_scaling + self.input_shift
-        print 'computing forward state'
         forward_states = self.forward.compute_states(scaled_features)
-        print 'computing backward state'
         backward_states = self.backward.compute_states(scaled_features)
 
         return np.concatenate((forward_states, backward_states,
-                               #np.random.random(scaled_features.shape)
                                scaled_features
                            ), 2)
 
     def train(self, features, targets):
-        print 'getting states'
         states = self.states(features)
-        print 'reshaping states'
         states = np.reshape(states, [-1, self.n_hidden_2])
-        print 'reshaping outputs'
         outputs = np.reshape(targets, [-1, self.n_outputs])
-        print 'will do regression'
         weights = ridge_regression(states, outputs, self.ridge_beta)
         self.w_hy = weights
 
     def y(self, features, trace=None):
-        print 'getting states for y'
         states = self.states(features)
-        print 'getting y'
 
         if trace is not None:
             trace.update({'states': states})
@@ -156,9 +144,7 @@ class EchoStateNetworkNumPy(EchoStateNetwork):
             self.w_hy).reshape([-1, self.n_steps, self.n_outputs])
 
     def accuracy(self, features, targets, trace=None):
-        print 'getting y for accuracy'
         y = self.y(features, trace)
-        print 'predicting and comparing'
         predicted = np.argmax(y, 2)
         actual = np.argmax(targets, 2)
         correct = predicted == actual
@@ -170,6 +156,10 @@ class EchoStateNetworkNumPy(EchoStateNetwork):
                           'y': y})
 
         return np.mean(correct)
+
+    def save(self, filename):
+        with open(filename, 'w') as f:
+            cPickle.dump(self, f, protocol=cPickle.HIGHEST_PROTOCOL)
 
 
 class DirectionTensorFlow(object):
@@ -288,11 +278,8 @@ class EchoStateNetworkTensorFlow(EchoStateNetwork):
         return tf.assign(self.w_hy, weights)
 
 def ridge_regression(x, y, beta):
-    print "preparing for regression X'X,",
     r = x.T.dot(x)
-    print "X'Y"
     p = x.T.dot(y)
-    print 'doing regression'
     return np.linalg.inv(
         r + beta * np.eye(x.shape[1])
     ).dot(p)
@@ -304,8 +291,6 @@ def test_esn():
     y[np.arange(10000), np.argmax(x, 1) / 2] = 1
     x = x.reshape([10, 1000, 4])
     y = y.reshape([10, 1000, 2])
-    
-
 
 def train_tf():
     n_steps = esn.n_steps
@@ -332,66 +317,77 @@ def train_np():
 
 def impulse_demo(esn):
     x = np.zeros([1, esn.n_steps, esn.n_inputs])
-    x[:, :1, :] = x[:, -1:, :] = 1
+    x[:, ::50, :] = 1
     if isinstance(esn, EchoStateNetworkTensorFlow):
         return sess.run(esn.states, {esn.x: x})[0]
     else:
-        return esn.states(x)[0]
+        return esn.states(x)[0][:, :-esn.n_inputs]
 
 def input_demo(esn, datasets):
     x = datasets.train.next_batch(steps=esn.n_steps, hop=1, batch_size=1).features[:, :, :84]
     if isinstance(esn, EchoStateNetworkTensorFlow):
         return sess.run(esn.states, {esn.x: x})[0]
     else:
-        return esn.states(x)[0]
+        return esn.states(x)[0][:, :-esn.n_inputs]
 
 def main(unused_args):
     require_flag('billboard_path')
 
-    print 'Reading datasets... '
-    cache_filename = '../datasets.cpkl'
+    feature_type = FLAGS.feature_type
+    cache_filename = '../billboard-datasets-%s.cpkl' % feature_type
     if os.path.exists(cache_filename):
-        datasets = billboard.load_datasets(cache_filename)
+        datasets = load_datasets(cache_filename)
     else:
-        datasets = billboard.read_datasets(FLAGS.billboard_path,
-                                           feature_type=billboard.CQT)
-        billboard.dump_datasets(datasets, cache_filename)
+        datasets = billboard.read_billboard_datasets(FLAGS.billboard_path,
+                                                     feature_type=FLAGS.feature_type)
+        dump_datasets(datasets, cache_filename)
+
+    # grid = {
+    #     'n_hidden': [300, 800, 1300, 1800, 2300, 2800, 3300],
+    #     'n_steps': [200],
+    #     'spectral_radius': [1.],
+    #     'connectivity': [.01, .0001],
+    #     'max_leakage': [.99],
+    #     'min_leakage': [.3],
+    #     'ridge_beta': [0, .5],
+    #     'input_scaling': [.2],
+    #     'input_shift': [0],
+    # }
 
     grid = {
-        'n_hidden': [1000, 2000],
-        'n_steps': [200, 200, 200, 100],
-        'spectral_radius': [1., 1.1, 1., 1.1, 1.3, .9],
-        'connectivity': [.01, .001, .1, .01, .001, .1, .4],
-        'max_leakage': [.9, .6],
-        'min_leakage': [0., .3, .6],
-        'ridge_beta': [0, 0, .5],
-        #'input_scaling': [.4, .1],
-        #'input_shift': [-.2, -.05],
-        #'input_scaling': [.1],
-        #'input_shift': [-.05],
-        'input_scaling': [.02, .2, .002, .02, .2, .002, 1.0],
-        'input_shift': [0, -.001, 0, -.001, -.2],
+        'n_hidden': [2000],
+        'n_steps': [200],
+        'spectral_radius': [1.],
+        'connectivity': [.01],
+        'max_leakage': [.99],
+        'min_leakage': [.3],
+        'ridge_beta': [.5],
+        'input_scaling': [.2],
+        'input_shift': [0],
     }
     grid_product = list(dict_product(grid))
-    random.shuffle(grid_product)
+    #random.shuffle(grid_product)
 
-    for epoch, config in enumerate(grid_product):
+    for config in grid_product:
+
+        config['n_inputs'] = datasets.train.feature_reader.num_features
+        config['n_outputs'] = datasets.train.label_reader.num_labels
 
         print '\n%s' % config
 
         if FLAGS.backend == 'numpy':
-            numpy_epoch(datasets, config, epoch)
+            numpy_eval(datasets, config)
         elif FLAGS.backend == 'tensorflow':
-            tensorflow_epoch(datasets, config, epoch)
+            tensorflow_eval(datasets, config)
         else:
             print 'unknown backend'
 
-def tensorflow_epoch(datasets, config, epoch):
+def tensorflow_eval(datasets, config):
 
     with tf.Graph().as_default(), tf.Session() as sess:
 
         n_steps = config['n_steps']
-        n_hop = n_steps / 2
+        n_hop = n_steps #/ 2
         train_batch = datasets.train.single_batch(n_steps, n_hop)
         test_batch = datasets.test.single_batch(n_steps, n_hop)
 
@@ -418,25 +414,47 @@ def tensorflow_epoch(datasets, config, epoch):
         print 'ensemble accuracy: %.2f%%; mean accuracy: %.2f%%' % (
             ensemble_accuracy * 100, np.mean(accuracies) * 100)
 
-def numpy_epoch(datasets, config, epoch):
+def numpy_eval(datasets, config, iterations=1):
 
-    esn = EchoStateNetworkNumPy(**config)
+    ys = []
+    lfn = []
+    accuracies = []
 
-    n_steps = esn.n_steps
-    n_hop = n_steps / 2
-    train_batch = datasets.train.single_batch(n_steps, n_hop)
-    esn.train(train_batch.features[:, :, :84], train_batch.targets)
+    esns = []
 
-    test_batch = datasets.test.single_batch(n_steps, n_hop)
-    trace = {}
-    accuracy = esn.accuracy(test_batch.features[:, :, :84], test_batch.targets, trace)
-    print 'accuracy at epoch %d: %.2f%%' % (epoch, accuracy * 100)
+    for i in range(iterations):
 
-    print 'learned_rate delta: %.2f' % learned_rate_np(esn, test_batch, trace['states'])
+        print i
 
-    return esn, test_batch, trace['states']
+        esn = EchoStateNetworkNumPy(**config)
+        esns.append(esn)
 
-def learned_rate_np(esn, batch, states):
+        n_steps = esn.n_steps
+        n_hop = n_steps #/ 2
+
+        train_batch = datasets.train.single_batch(n_steps, n_hop)
+        test_batch = datasets.test.single_batch(n_steps, n_hop)
+
+        esn.train(train_batch.features[:, :, :84], train_batch.targets)
+
+        trace = {}
+        accuracy = esn.accuracy(test_batch.features[:, :, :84], test_batch.targets, trace)
+        learned_from_network = learned_from_network_np(esn, test_batch, trace['states'])
+        y = trace['y']
+
+        ys.append(y)
+        accuracies.append(accuracy)
+        lfn.append(learned_from_network)
+
+    ensemble_predictions = mode(np.argmax(ys, 3), 0)[0].reshape([-1, n_steps])
+    ensemble_accuracy = np.mean(ensemble_predictions == test_batch.targets.argmax(2))
+
+    print 'ensemble_accuracy: %.2f%% mean_accuracy: %.2f%% mean_learned_from_network: %.2f%%' % (ensemble_accuracy * 100, np.mean(accuracies) * 100, np.mean(lfn) * 100)
+
+    return esns
+        
+
+def learned_from_network_np(esn, batch, states):
     states = np.reshape(states, [-1, esn.n_hidden_2])
     targets = batch.targets
     def score(indices):
