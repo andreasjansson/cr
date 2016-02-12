@@ -18,10 +18,10 @@ if 'flags' not in globals():
     flags.DEFINE_integer('max_epoch', 10000, 'Maximum number of epochs')
     flags.DEFINE_integer('steps', 100, 'Number of time steps per batch')
     #flags.DEFINE_integer('hop', 40, 'Hop time steps between batches')
-    flags.DEFINE_integer('batch_size', 20, 'Batch size in training')
+    flags.DEFINE_integer('batch_size', 50, 'Batch size in training')
     flags.DEFINE_integer('hidden', 500, 'Number of RNN hidden units')
     flags.DEFINE_integer('rnn_layers', 3, 'Number of BiLSTM layers')
-    flags.DEFINE_integer('learning_rate', 0.04, 'Learning rate')
+    flags.DEFINE_integer('learning_rate', 0.02, 'Learning rate')
     flags.DEFINE_integer('learning_rate_decay', 0.9998, 'Learning rate decay')
     flags.DEFINE_boolean('convolution', False, 'Whether to add a convolution step at the end')
     flags.DEFINE_integer('conv_patch_width', 16, 'Convolution patch width')
@@ -34,13 +34,13 @@ class LSTM(object):
 
     def __init__(
             self,
-            n_inputs=12,# + 5,
+            n_inputs=84,
             n_outputs=26,
-            n_steps=50,
-            n_rnn_layers=1,
+            n_steps=100,
+            n_rnn_layers=4,
             gradient_clip=5,
             do_convolution=False,
-            n_hidden=100,
+            n_hidden=500,
             conv_patch_width=16,
             conv_patch_height=16,
             n_conv_patches=20,
@@ -165,39 +165,59 @@ def train(datasets, sess, model, writer=None, max_epoch=50000,
 
     print '\nTraining...\n'
 
+    if saver is not None:
+        saver.restore(sess, '../lstm-model.saver')
+
     #overfit_batch = datasets.train.next_batch(n_steps, n_hop, batch_size)
     #test_batch = overfit_batch
 
     learning_rate = FLAGS.learning_rate
 
+    accuracies = []
     for epoch in range(max_epoch):
         if epoch % 50 == 0 and epoch > 0:
 
             if saver is not None:
                 saver.save(sess, '../lstm-model.saver')
 
+            print ('train_accuracy: %.2f ' % (np.mean(accuracies) * 100)),
             accuracies = []
-            costs = []
-            for test_batch in datasets.test.all_batches(n_steps, n_hop, batch_size):
-                cost, acc = sess.run(
-                    [model.cost, model.accuracy],
-                    {model.x: test_batch.features[:, :, :84],
-                     model.target: test_batch.targets})
-                accuracies.append(acc)
-                costs.append(cost)
 
-            #if writer:
-            #    writer.add_summary(summary_str, epoch)
-
-            print 'Epoch %d, accuracy: %.2f  cost: %.2f, learning_rate: %.4f' % (epoch, np.mean(accuracies) * 100, np.mean(costs), learning_rate)
+            evaluate(sess, model, datasets.test, 100, n_hop, epoch, learning_rate)
 
         batch = datasets.train.next_batch(n_steps, n_hop, batch_size)
         #batch = overfit_batch
-        sess.run(model.train, {model.x: batch.features[:, :, :84],
-                               model.target: batch.targets,
-                               model.learning_rate: learning_rate})
+        accuracy, _ = sess.run([model.accuracy, model.train],
+                               {model.x: batch.features[:, :, :84],
+                                model.target: batch.targets,
+                                model.learning_rate: learning_rate})
+
+        accuracies.append(accuracy)
 
         learning_rate *= FLAGS.learning_rate_decay
+
+def evaluate(sess, model, test_set, batch_size=20, n_hop=None, epoch=0, learning_rate=0):
+    if n_hop is None:
+        n_hop = model.n_steps
+
+    accuracies = []
+    costs = []
+    num_batches = test_set.num_batches(model.n_steps, n_hop) / batch_size
+    for i, test_batch in enumerate(test_set.all_batches(model.n_steps, n_hop, batch_size)):
+        cost, acc = sess.run(
+            [model.cost, model.accuracy],
+            {model.x: test_batch.features[:, :, :84],
+             model.target: test_batch.targets})
+        accuracies.append(acc)
+        costs.append(cost)
+
+        #print i, num_batches, acc
+
+    #if writer:
+    #    writer.add_summary(summary_str, epoch)
+
+    print 'Epoch %d, accuracy: %.2f  cost: %.2f, learning_rate: %.4f' % (epoch, np.mean(accuracies) * 100, np.mean(costs), learning_rate)
+
 
 def main(unused_args):
     require_flag('billboard_path')
