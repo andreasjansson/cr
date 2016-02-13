@@ -1,3 +1,4 @@
+import re
 import numpy as np
 import os
 import matplotlib.pyplot as plt
@@ -73,3 +74,8 @@ def imshow_max_chords(x):
 def xticks_chords():
     plt.xticks(np.arange(26), [Chord.from_number(i).to_string() for i in range(26)],
                rotation=50)
+
+def fuzzy(s):
+    s = s.strip().split('(')[0].split('[')[0].split(' - ')[0].lower()
+    return re.sub('(^the)|[^a-z0-9]', '', s)
+

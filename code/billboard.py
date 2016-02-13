@@ -1,6 +1,10 @@
 import os
 import numpy as np
 import json
+from bidict import bidict
+
+if 'fuzzy' not in globals():
+    from util import fuzzy
 
 if 'datasets' not in globals():
     from datasets import read_datasets, align, TimedData, Segment
@@ -124,7 +128,19 @@ def read_billboard_track_ids(billboard_path):
         track_ids = [i.strip() for i in f.readlines()]
     return track_ids
 
+def get_fuzzy_name_mapping(billboard_path):
+    mapping = bidict()
+    track_ids = read_billboard_track_ids(billboard_path)
+    for track_id in track_ids:
+        with open(mcgill_path(billboard_path, track_id, 'echonest.json')) as f:
+            meta = json.load(f)['meta']
+            artist = meta['artist']
+            title = meta['title']
+            mapping[(fuzzy(artist), fuzzy(title))] = track_id
+    return mapping
+
 def read_billboard_datasets(billboard_path, feature_type='cqt', subset=None):
+    subset=10
     if feature_type == 'cqt':
         feature_reader = BillboardCQTReader(billboard_path)
     elif feature_reader == 'chromagram':

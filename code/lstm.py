@@ -23,10 +23,6 @@ if 'flags' not in globals():
     flags.DEFINE_integer('rnn_layers', 3, 'Number of BiLSTM layers')
     flags.DEFINE_integer('learning_rate', 0.02, 'Learning rate')
     flags.DEFINE_integer('learning_rate_decay', 0.9998, 'Learning rate decay')
-    flags.DEFINE_boolean('convolution', False, 'Whether to add a convolution step at the end')
-    flags.DEFINE_integer('conv_patch_width', 16, 'Convolution patch width')
-    flags.DEFINE_integer('conv_patch_height', 16, 'Convolution patch height')
-    flags.DEFINE_integer('conv_patches', 20, 'Number of convolution patches')
     flags.DEFINE_integer('gradient_clip', 5, 'Max gradient norm')
     flags.DEFINE_string('feature_type', 'cqt', 'cqt/chromagram/unaligned_chromagram')
 
@@ -37,13 +33,9 @@ class LSTM(object):
             n_inputs=84,
             n_outputs=26,
             n_steps=100,
-            n_rnn_layers=4,
+            n_rnn_layers=3,
             gradient_clip=5,
-            do_convolution=False,
             n_hidden=500,
-            conv_patch_width=16,
-            conv_patch_height=16,
-            n_conv_patches=20,
     ):
         self.n_inputs = n_inputs
         self.n_outputs = n_outputs
@@ -51,15 +43,11 @@ class LSTM(object):
         self.n_rnn_layers = n_rnn_layers
         self.learning_rate = tf.placeholder('float32')
         self.gradient_clip = gradient_clip
-        self.do_convolution = do_convolution
         self.n_hidden = n_hidden
-        self.conv_patch_width = conv_patch_width
-        self.conv_patch_height = conv_patch_height
-        self.n_conv_patches = n_conv_patches
 
         self.x = tf.placeholder('float32', [None, n_steps, n_inputs], name='x')
         self.target = tf.placeholder('float32', [None, n_steps, n_outputs], name='target')
-        self.target_flat = self.make_target_flat()
+        self.target_flat = tf.reshape(self.target, [-1, self.n_outputs])
 
         self.x_list = [tf.reshape(i, (-1, self.n_inputs))
                        for i in tf.split(1, self.n_steps, self.x)]
@@ -76,12 +64,9 @@ class LSTM(object):
         self.final_rnn_outputs = tf.reshape(tf.concat(
             1, rnn_outputs), [-1, self.n_hidden * 2])
 
-        if do_convolution:
-            self.y = self.make_conv_layers()
-        else:
-            self.w = tf.Variable(tf.zeros([self.n_hidden * 2, self.n_outputs]), name='w')
-            self.b = tf.Variable(tf.zeros([self.n_outputs]), name='b')
-            self.y = tf.nn.xw_plus_b(self.final_rnn_outputs, self.w, self.b)
+        self.w = tf.Variable(tf.zeros([self.n_hidden * 2, self.n_outputs]), name='w')
+        self.b = tf.Variable(tf.zeros([self.n_outputs]), name='b')
+        self.y = tf.nn.xw_plus_b(self.final_rnn_outputs, self.w, self.b)
 
         self.cost = tf.reduce_sum(
             tf.nn.softmax_cross_entropy_with_logits(
@@ -108,37 +93,6 @@ class LSTM(object):
         #self.accuracy_summary = tf.scalar_summary("accuracy", self.accuracy)
         #self.merged = tf.merge_all_summaries()
 
-    def make_target_flat(self):
-        if self.do_convolution:
-            return tf.reshape(
-                tf.transpose(self.target, [1, 0, 2]),
-                [-1, self.n_outputs])
-        else:
-            return tf.reshape(self.target, [-1, self.n_outputs])
-
-    def make_conv_layers(self):
-        rnn_output_batches = tf.transpose(
-            tf.reshape(tf.concat(0, self.final_rnn_outputs),
-                       [self.n_steps, -1, self.n_hidden * 2]),
-            [1, 0, 2]
-        )
-
-        conv_w = tf.Variable(tf.truncated_normal(
-            [self.conv_patch_width, self.conv_patch_height, 1, self.n_conv_patches],
-            stddev=0.1))
-        conv_b = tf.Variable(tf.zeros([self.n_conv_patches]))
-
-        conv_output_size = self.n_hidden * 2 * self.n_conv_patches
-
-        conv = tf.nn.conv2d(
-            tf.reshape(rnn_output_batches, [-1, self.n_steps, self.n_hidden * 2, 1]),
-            conv_w, strides=[1, 1, 1, 1], padding='SAME')
-        conv_outputs = tf.reshape(tf.nn.relu(conv + conv_b), [-1, conv_output_size])
-
-        w = tf.Variable(tf.zeros([conv_output_size, self.n_outputs]), name='w')
-        b = tf.Variable(tf.zeros([self.n_outputs]), name='b')
-        return tf.nn.xw_plus_b(tf.concat(0, conv_outputs), w, b)
-
     def rnn_layer(self, inputs, sequence_length):
         input_dims = inputs[0].get_shape()[1]
         rnn_cell_fw = LSTMCell(self.n_hidden, input_dims)
@@ -161,15 +115,11 @@ def train(datasets, sess, model, writer=None, max_epoch=50000,
           batch_size=200, saver=None):
     n_steps = model.n_steps
     n_hop = n_steps // 2
-    #test_batch = datasets.test.next_batch(n_steps, n_hop, 400)
 
     print '\nTraining...\n'
 
-    if saver is not None:
-        saver.restore(sess, '../lstm-model.saver')
-
-    #overfit_batch = datasets.train.next_batch(n_steps, n_hop, batch_size)
-    #test_batch = overfit_batch
+    #if saver is not None:
+    #    saver.restore(sess, '../lstm-model.saver')
 
     learning_rate = FLAGS.learning_rate
 
@@ -186,7 +136,6 @@ def train(datasets, sess, model, writer=None, max_epoch=50000,
             evaluate(sess, model, datasets.test, 100, n_hop, epoch, learning_rate)
 
         batch = datasets.train.next_batch(n_steps, n_hop, batch_size)
-        #batch = overfit_batch
         accuracy, _ = sess.run([model.accuracy, model.train],
                                {model.x: batch.features[:, :, :84],
                                 model.target: batch.targets,
@@ -210,8 +159,6 @@ def evaluate(sess, model, test_set, batch_size=20, n_hop=None, epoch=0, learning
              model.target: test_batch.targets})
         accuracies.append(acc)
         costs.append(cost)
-
-        #print i, num_batches, acc
 
     #if writer:
     #    writer.add_summary(summary_str, epoch)
@@ -247,11 +194,7 @@ def main(unused_args):
             n_steps=FLAGS.steps,
             n_rnn_layers=FLAGS.rnn_layers,
             gradient_clip=FLAGS.gradient_clip,
-            do_convolution=FLAGS.convolution,
             n_hidden=FLAGS.hidden,
-            conv_patch_width=FLAGS.conv_patch_width,
-            conv_patch_height=FLAGS.conv_patch_height,
-            n_conv_patches=FLAGS.conv_patches,
         )
         sess.run(tf.initialize_all_variables())
 

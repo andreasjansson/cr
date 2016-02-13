@@ -6,6 +6,8 @@ import re
 import h5py
 import Levenshtein
 
+from util import fuzzy
+
 # from datasets import (
 #     OnDiskDataset,
 #     TimedData,
@@ -56,10 +58,6 @@ def read_k400():
             title = regexp.split(title)[0]
             index[(fuzzy(artist), fuzzy(title))].append(filename)
     return index
-
-def fuzzy(s):
-    s = s.strip().split('(')[0].split('[')[0].split(' - ')[0].lower()
-    return re.sub('(^the)|[^a-z0-9]', '', s)
 
 def get_artist2k400(k400):
     artist2k400 = defaultdict(lambda: defaultdict(list))
