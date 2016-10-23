@@ -5,6 +5,8 @@ from collections import Counter, OrderedDict
 
 NO_CHORD = 'NO_CHORD'
 UNKNOWN_CHORD = 'UNKNOWN_CHORD'
+NO_CHORD_NUMBER = 0
+UNKNOWN_CHORD_NUMBER = 1
 
 CHORDS = {
     ''         : [0, 4, 7],
@@ -281,12 +283,12 @@ class Chord(object):
 
     @staticmethod
     def from_number(x):
-        if x == 24:
+        if x == NO_CHORD_NUMBER:
             return Chord(None, NO_CHORD)
-        if x == 25:
+        if x == UNKNOWN_CHORD:
             return Chord(None, None)
-        root = int(x / 2)
-        quality = ['maj', 'min'][x % 2]
+        root = int((x - 2) / 2) # -2 for no chord / unknown chord
+        quality = ['maj', 'min'][(x - 2) % 2]
         return Chord(root, quality)
 
     @staticmethod
@@ -318,15 +320,15 @@ class Chord(object):
     def get_number(self):
         if self.root is None:
             if self.quality == NO_CHORD:
-                return 24
+                return NO_CHORD_NUMBER
             else:
-                return 25
+                return UNKNOWN_CHORD_NUMBER
         n = self.root * 2
 
         if self.quality == 'maj':
-            return n
+            return n + 2 # +2 for no chord / unknown chord
         elif self.quality == 'min':
-            return n + 1
+            return n + 3
 
         raise Exception('Unknown chord: %s' % self)
 

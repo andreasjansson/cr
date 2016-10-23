@@ -1,15 +1,18 @@
+from os.path import expanduser
+import numpy as np
 import os
 import tensorflow as tf
 
 if 'BillboardCQTReader' not in globals():
     from billboard import BillboardCQTReader, BillboardLabelReader, read_billboard_track_ids
 
-def make_sequence_example(features, labels):
+def make_sequence_example(track_id, features, labels):
     # The object we return
     ex = tf.train.SequenceExample()
     # A non-sequential feature of our example
     sequence_length = len(features)
     ex.context.feature["length"].int64_list.value.append(sequence_length)
+    ex.context.feature["track_id"].bytes_list.value.append(track_id)
 
     # Feature lists for the two sequential features of our example
     fl_features = ex.feature_lists.feature_list["features"]
@@ -23,7 +26,7 @@ def make_sequence_example(features, labels):
 def track_to_example(track_id, feature_reader, label_reader):
     segments, features = feature_reader.read_features(track_id)
     adjusted_segments, labels = label_reader.read_aligned_labels(track_id, segments)
-    return make_sequence_example(features, labels)
+    return make_sequence_example(track_id, features, labels)
 
 def write_tf_records(track_ids, feature_reader, label_reader, filename):
     with tf.python_io.TFRecordWriter(filename) as writer:
@@ -44,10 +47,13 @@ def partition_track_ids(track_ids, conf):
         partitioned.append((name, track_ids[start:end]))
     return partitioned
 
-def write_billboard(billboard_path, output_path):
+# write_billboard(expanduser('~/phd/data/billboard'), expanduser('~/phd/cr/tf_records/billboard'))
+def write_billboard(billboard_path, output_path, max_records=None):
     feature_reader = BillboardCQTReader(billboard_path, half_beats=False)
     label_reader = BillboardLabelReader(billboard_path)
     track_ids = read_billboard_track_ids(billboard_path)
+    if max_records is not None:
+        track_ids = track_ids[:max_records]
 
     for dataset_name, dataset_track_ids in partition_track_ids(
             track_ids, {'train': 0.50, 'test': 0.25, 'validate': 0.25}):
@@ -86,3 +92,58 @@ def input_pipeline(filenames, batch_size, num_epochs=None):
             [context_parsed, sequence_parsed], batch_size=batch_size, capacity=capacity,
             min_after_dequeue=min_after_dequeue)
     return context_batch, sequence_batch
+
+# track_id1, lengths1, features1, labels1 = next(read_tfrecord_batched(expanduser('~/phd/cr/tf_records_tmp/train.tfrecords.proto'), 20))
+# sess.run(accuracy, feed_dict={features_batch: features1, labels_batch: labels1, length_batch: lengths1})
+def read_tfrecord_batched(filename, batch_size):
+    track_id_batch = []
+    length_batch = []
+    features_batch = []
+    labels_batch = []
+
+    for serialized_example in tf.python_io.tf_record_iterator(filename):
+
+        if len(length_batch) == batch_size:
+            yield (
+                np.array(track_id_batch),
+                np.array(length_batch),
+                padded_array_3d(features_batch),
+                padded_array_2d(labels_batch)
+            )
+
+            track_id_batch = []
+            length_batch = []
+            features_batch = []
+            labels_batch = []
+
+        example = tf.train.SequenceExample()
+        example.ParseFromString(serialized_example)
+
+        context = example.context.feature
+        lists = example.feature_lists.feature_list
+
+        track_id_batch.append(context['track_id'].bytes_list.value[0])
+        length_batch.append(context['length'].int64_list.value[0])
+        features_batch.append([f.float_list.value for f in lists['features'].feature])
+        labels_batch.append([f.int64_list.value[0] for f in lists['labels'].feature])
+
+    yield (
+        np.array(track_id_batch),
+        np.array(length_batch),
+        padded_array_3d(features_batch),
+        padded_array_2d(labels_batch)
+    )
+
+def padded_array_2d(arr):
+    max_len = np.max([len(a) for a in arr])
+    padded = np.zeros([len(arr), max_len])
+    for i, a in enumerate(arr):
+        padded[i, :len(a)] = np.array(a)
+    return padded
+
+def padded_array_3d(arr):
+    max_len = np.max([len(a) for a in arr])
+    padded = np.zeros([len(arr), max_len, len(arr[0][0])])
+    for i, a in enumerate(arr):
+        padded[i, :len(a), :] = np.array(a)
+    return padded
