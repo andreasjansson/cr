@@ -1,3 +1,4 @@
+import datetime
 import tensorflow as tf
 import tflearn
 from os.path import expanduser
@@ -32,15 +33,15 @@ def get_train_op(length_batch, features_batch, labels_batch):
     train = tf.train.GradientDescentOptimizer(
         0.1).apply_gradients(zip(grads, tvars))
 
-    return train, mean_loss, accuracy
+    return train, mean_loss, accuracy, outputs
 
 tf.reset_default_graph()
 sess = tf.Session()
 
-batch_size = 20
-num_epochs = 10
+batch_size = 50
+num_epochs = 1000
 
-filenames = [expanduser('~/phd/cr/tf_records_tmp/train.tfrecords.proto')]
+filenames = [expanduser('~/phd/cr/tf_records/billboard/train.tfrecords.proto')]
 
 filename_queue = tf.train.string_input_producer(
     filenames, num_epochs=num_epochs, shuffle=True)
@@ -78,13 +79,15 @@ capacity = min_after_dequeue + 3 * batch_size
     #num_threads=4
 )
 
-train, mean_loss, accuracy = get_train_op(length_batch, features_batch, labels_batch)
+train, mean_loss, accuracy, outputs = get_train_op(length_batch, features_batch, labels_batch)
 
 sess.run(tf.initialize_all_variables())
 sess.run(tf.initialize_local_variables())
 
 coord = tf.train.Coordinator()
 threads = tf.train.start_queue_runners(sess=sess, coord=coord)
+
+print datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 try:
     while True:
@@ -95,3 +98,5 @@ except tf.errors.OutOfRangeError, e:
 finally:
    coord.request_stop()
    coord.join(threads)
+
+print datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')

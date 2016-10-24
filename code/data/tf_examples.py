@@ -105,10 +105,10 @@ def read_tfrecord_batched(filename, batch_size):
 
         if len(length_batch) == batch_size:
             yield (
-                np.array(track_id_batch),
-                np.array(length_batch),
-                padded_array_3d(features_batch),
-                padded_array_2d(labels_batch)
+                np.array(track_id_batch, dtype=np.int64),
+                np.array(length_batch, dtype=np.int64),
+                padded_array_3d(features_batch, dtype=np.float32),
+                padded_array_2d(labels_batch, dtype=np.float32)
             )
 
             track_id_batch = []
@@ -128,22 +128,22 @@ def read_tfrecord_batched(filename, batch_size):
         labels_batch.append([f.int64_list.value[0] for f in lists['labels'].feature])
 
     yield (
-        np.array(track_id_batch),
-        np.array(length_batch),
-        padded_array_3d(features_batch),
-        padded_array_2d(labels_batch)
+        np.array(track_id_batch, dtype=np.int64),
+        np.array(length_batch, dtype=np.int64),
+        padded_array_3d(features_batch, dtype=np.float32),
+        padded_array_2d(labels_batch, dtype=np.float32)
     )
 
-def padded_array_2d(arr):
+def padded_array_2d(arr, **kwargs):
     max_len = np.max([len(a) for a in arr])
-    padded = np.zeros([len(arr), max_len])
+    padded = np.zeros([len(arr), max_len], **kwargs)
     for i, a in enumerate(arr):
         padded[i, :len(a)] = np.array(a)
     return padded
 
-def padded_array_3d(arr):
+def padded_array_3d(arr, **kwargs):
     max_len = np.max([len(a) for a in arr])
-    padded = np.zeros([len(arr), max_len, len(arr[0][0])])
+    padded = np.zeros([len(arr), max_len, len(arr[0][0])], **kwargs)
     for i, a in enumerate(arr):
         padded[i, :len(a), :] = np.array(a)
     return padded
