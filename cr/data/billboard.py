@@ -5,13 +5,13 @@ import json
 from bidict import bidict
 
 if 'fuzzy' not in globals():
-    from util import fuzzy
+    from cr.common.util import fuzzy
 
 if 'read_datasets' not in globals():
-    from datasets import read_datasets, align, TimedData, Segment
+    from cr.data.datasets import read_datasets, align, TimedData, Segment
 
 if 'Chord' not in globals():
-    from chords import Chord
+    from cr.data.chords import Chord
 
 CHROMAGRAM = 'chromagram'
 CQT = 'cqt'

@@ -39,7 +39,7 @@ tf.reset_default_graph()
 sess = tf.Session()
 
 batch_size = 50
-num_epochs = 1000
+num_epochs = 5000
 
 filenames = [expanduser('~/phd/cr/tf_records/billboard/train.tfrecords.proto')]
 

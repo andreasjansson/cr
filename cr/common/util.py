@@ -3,6 +3,9 @@ import numpy as np
 import os
 import matplotlib.pyplot as plt
 
+if 'Chord' not in globals():
+    from cr.data.chords import Chord
+
 def data_file_LOCAL(rel_path, mode='r'):
     return open(os.path.join(os.path.expanduser('~/phd/data'), rel_path), mode)
 

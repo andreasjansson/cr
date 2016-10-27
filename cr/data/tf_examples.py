@@ -1,10 +1,9 @@
-from os.path import expanduser
 import numpy as np
 import os
 import tensorflow as tf
 
 if 'BillboardCQTReader' not in globals():
-    from billboard import BillboardCQTReader, BillboardLabelReader, read_billboard_track_ids
+    from cr.data.billboard import BillboardCQTReader, BillboardLabelReader, read_billboard_track_ids
 
 def make_sequence_example(track_id, features, labels):
     # The object we return
@@ -60,39 +59,6 @@ def write_billboard(billboard_path, output_path, max_records=None):
         filename = os.path.join(output_path, '%s.tfrecords.proto' % dataset_name)
         write_tf_records(dataset_track_ids, feature_reader, label_reader, filename)
 
-def read_my_file_format(filename_queue):
-    reader = tf.TFRecordReader()
-    _, serialized_example = reader.read(filename_queue)
-    context_parsed, sequence_parsed = tf.parse_single_sequence_example(
-        serialized_example,
-        context_features={
-            "length": tf.FixedLenFeature([], dtype=tf.int64)
-        },
-        sequence_features={
-            "features": tf.FixedLenSequenceFeature([], dtype=tf.float32),
-            "labels": tf.FixedLenSequenceFeature([], dtype=tf.int64)
-        })
-    #processed_example = some_processing(example)
-    return context_parsed, sequence_parsed
-
-
-def input_pipeline(filenames, batch_size, num_epochs=None):
-    filename_queue = tf.train.string_input_producer(
-        filenames, num_epochs=num_epochs, shuffle=True)
-    context_parsed, sequence_parsed = read_my_file_format(filename_queue)
-    # min_after_dequeue defines how big a buffer we will randomly sample
-    #     from -- bigger means better shuffling but slower start up and more
-    #     memory used.
-    # capacity must be larger than min_after_dequeue and the amount larger
-    #     determines the maximum we will prefetch.    Recommendation:
-    #     min_after_dequeue + (num_threads + a small safety margin) * batch_size
-    min_after_dequeue = 10000
-    capacity = min_after_dequeue + 3 * batch_size
-    context_batch, sequence_batch = tf.train.shuffle_batch(
-            [context_parsed, sequence_parsed], batch_size=batch_size, capacity=capacity,
-            min_after_dequeue=min_after_dequeue)
-    return context_batch, sequence_batch
-
 # track_id1, lengths1, features1, labels1 = next(read_tfrecord_batched(expanduser('~/phd/cr/tf_records_tmp/train.tfrecords.proto'), 20))
 # sess.run(accuracy, feed_dict={features_batch: features1, labels_batch: labels1, length_batch: lengths1})
 def read_tfrecord_batched(filename, batch_size):
@@ -147,3 +113,34 @@ def padded_array_3d(arr, **kwargs):
     for i, a in enumerate(arr):
         padded[i, :len(a), :] = np.array(a)
     return padded
+
+def batches_from_queue(filename_queue, batch_size):
+    reader = tf.TFRecordReader()
+    _, serialized_example = reader.read(filename_queue)
+    context, sequence = tf.parse_single_sequence_example(
+        serialized_example,
+        context_features={
+            "length": tf.FixedLenFeature([], dtype=tf.int64),
+            "track_id": tf.FixedLenFeature([], dtype=tf.string, default_value='unknown')
+        },
+        sequence_features={
+            "features": tf.FixedLenSequenceFeature([84], dtype=tf.float32),
+            "labels": tf.FixedLenSequenceFeature([], dtype=tf.int64)
+        })
+
+    min_after_dequeue = 10000
+    capacity = min_after_dequeue + 3 * batch_size
+    track_id_batch, length_batch, features_batch, labels_batch = tf.train.batch(
+            [
+                context['track_id'],
+                context['length'],
+                sequence['features'],
+                sequence['labels']
+            ], 
+        batch_size=batch_size, 
+        capacity=capacity,
+        dynamic_pad=True,
+        #num_threads=4
+    )
+    
+    return track_id_batch, length_batch, features_batch, labels_batch

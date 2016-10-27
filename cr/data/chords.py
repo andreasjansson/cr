@@ -1,6 +1,6 @@
 import re
 import numpy as np
-from collections import Counter, OrderedDict
+from collections import OrderedDict
 #import librosa
 
 NO_CHORD = 'NO_CHORD'
