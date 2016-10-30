@@ -1,3 +1,4 @@
+from os.path import expanduser
 import numpy as np
 import os
 import tensorflow as tf
@@ -5,7 +6,10 @@ import tensorflow as tf
 if 'BillboardCQTReader' not in globals():
     from cr.data.billboard import BillboardCQTReader, BillboardLabelReader, read_billboard_track_ids
 
-def make_sequence_example(track_id, features, labels):
+if 'BeatlesCQTReader' not in globals():
+    from cr.data.beatles import BeatlesCQTReader, BeatlesLabelReader, BeatlesSegmentReader, iter_beatles_track_ids
+
+def make_sequence_example(track_id, features, labels, segments=None):
     # The object we return
     ex = tf.train.SequenceExample()
     # A non-sequential feature of our example
@@ -16,21 +20,31 @@ def make_sequence_example(track_id, features, labels):
     # Feature lists for the two sequential features of our example
     fl_features = ex.feature_lists.feature_list["features"]
     fl_labels = ex.feature_lists.feature_list["labels"]
-    for feature, label in zip(features, labels):
+    if segments:
+        fl_segments = ex.feature_lists.feature_list["segments"]
+
+    for i, feature in enumerate(features):
         fl_features.feature.add().float_list.value.extend(feature)
-        fl_labels.feature.add().int64_list.value.append(label)
+        fl_labels.feature.add().int64_list.value.append(labels[i])
+        if segments:
+            fl_segments.feature.add().int64_list.value.append(segments[i])
 
     return ex
 
-def track_to_example(track_id, feature_reader, label_reader):
-    segments, features = feature_reader.read_features(track_id)
-    adjusted_segments, labels = label_reader.read_aligned_labels(track_id, segments)
-    return make_sequence_example(track_id, features, labels)
+def track_to_example(track_id, feature_reader, label_reader, segment_reader=None):
+    features, beats = feature_reader.read_features(track_id)
+    labels = label_reader.read_aligned_labels(track_id, beats)
+    if segment_reader:
+        segments = segment_reader.read_aligned_segments(track_id, beats)
+    else:
+        segments = None
 
-def write_tf_records(track_ids, feature_reader, label_reader, filename):
+    return make_sequence_example(track_id, features, labels, segments)
+
+def write_tf_records(track_ids, filename, feature_reader, label_reader, segment_reader=None):
     with tf.python_io.TFRecordWriter(filename) as writer:
         for track_id in track_ids:
-            example = track_to_example(track_id, feature_reader, label_reader)
+            example = track_to_example(track_id, feature_reader, label_reader, segment_reader)
             writer.write(example.SerializeToString())
 
 def partition_track_ids(track_ids, conf):
@@ -45,19 +59,6 @@ def partition_track_ids(track_ids, conf):
             end = int(cum_proportion * len(track_ids))
         partitioned.append((name, track_ids[start:end]))
     return partitioned
-
-# write_billboard(expanduser('~/phd/data/billboard'), expanduser('~/phd/cr/tf_records/billboard'))
-def write_billboard(billboard_path, output_path, max_records=None):
-    feature_reader = BillboardCQTReader(billboard_path, half_beats=False)
-    label_reader = BillboardLabelReader(billboard_path)
-    track_ids = read_billboard_track_ids(billboard_path)
-    if max_records is not None:
-        track_ids = track_ids[:max_records]
-
-    for dataset_name, dataset_track_ids in partition_track_ids(
-            track_ids, {'train': 0.50, 'test': 0.25, 'validate': 0.25}):
-        filename = os.path.join(output_path, '%s.tfrecords.proto' % dataset_name)
-        write_tf_records(dataset_track_ids, feature_reader, label_reader, filename)
 
 # track_id1, lengths1, features1, labels1 = next(read_tfrecord_batched(expanduser('~/phd/cr/tf_records_tmp/train.tfrecords.proto'), 20))
 # sess.run(accuracy, feed_dict={features_batch: features1, labels_batch: labels1, length_batch: lengths1})
@@ -144,3 +145,28 @@ def batches_from_queue(filename_queue, batch_size):
     )
     
     return track_id_batch, length_batch, features_batch, labels_batch
+# write_billboard(expanduser('~/phd/data/billboard'), expanduser('~/phd/cr/tf_records/billboard'))
+def write_billboard(billboard_path, output_path, max_records=None):
+    feature_reader = BillboardCQTReader(billboard_path, half_beats=False)
+    label_reader = BillboardLabelReader(billboard_path)
+    track_ids = read_billboard_track_ids(billboard_path)
+    if max_records is not None:
+        track_ids = track_ids[:max_records]
+
+    for dataset_name, dataset_track_ids in partition_track_ids(
+            track_ids, {'train': 0.50, 'test': 0.25, 'validate': 0.25}):
+        filename = os.path.join(output_path, '%s.tfrecords.proto' % dataset_name)
+        write_tf_records(dataset_track_ids, filename, feature_reader, label_reader)
+
+def write_beatles(output_path=expanduser('~/phd/cr/tf_records/beatles'), max_records=None):
+    feature_reader = BeatlesCQTReader(half_beats=False)
+    label_reader = BeatlesLabelReader()
+    segment_reader = BeatlesSegmentReader()
+    track_ids = list(iter_beatles_track_ids())
+    if max_records is not None:
+        track_ids = track_ids[:max_records]
+
+    for dataset_name, dataset_track_ids in partition_track_ids(
+            track_ids, {'train': 0.50, 'test': 0.25, 'validate': 0.25}):
+        filename = os.path.join(output_path, '%s.tfrecords.proto' % dataset_name)
+        write_tf_records(dataset_track_ids, filename, feature_reader, label_reader, segment_reader)

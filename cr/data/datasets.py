@@ -1,12 +1,82 @@
+import json
 import cPickle
 import random
 import numpy as np
 from collections import namedtuple
 
+if 'Chord' not in globals():
+    from cr.data.chords import Chord
+
 Batch = namedtuple('Batch', ['features', 'targets', 'track_ids'])
 Datasets = namedtuple('Datasets', ['train', 'test', 'validation'])
 TimedData = namedtuple('TimedData', ['start', 'end', 'data'])
-Segment = namedtuple('Segment', ['start', 'end'])
+Beat = namedtuple('Beat', ['start', 'end'])
+
+def read_lab_chords(filename):
+    chords = []
+    with open(filename) as f:
+        chord_lines = f.readlines()
+
+    chords = []
+    for line in chord_lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        start, end, chord = line.split(' ')
+        start = float(start)
+        end = float(end)
+        chord = Chord.from_string(chord)
+        chords.append(TimedData(start, end, chord.get_number()))
+
+    return chords
+
+def read_lab_segments(filename):
+    segments = []
+    with open(filename) as f:
+        for line in f:
+            start, end, _, segment_name = line.strip().split('\t')
+            segment_label = segment_to_number(segment_name)
+            segments.append(TimedData(float(start), float(end), segment_label))
+    return segments
+
+def segment_to_number(name):
+    UNKNOWN = 8
+    substrings = (
+        ('verse', 1),
+        ('silence', 2),
+        ('refrain', 3),
+        ('chorus', 3),
+        ('bridge', 4),
+        ('intro', 5),
+        ('outro', 6),
+        ('closing', 6),
+        ('break', 7),
+        ('interlude', 7),
+        ('instrumental', 7),
+        ('vocal', 7),
+    )
+
+    for substring, number in substrings:
+        if substring in name:
+            return number
+
+    return UNKNOWN
+
+def read_timed_cqt(filename):
+    with open(filename) as f:
+        cqt = json.load(f)
+
+    timed_cqts = []
+    prev = None
+    for frame in cqt:
+        if prev:
+            timed_cqts.append(TimedData(
+                prev['time'], frame['time'], np.array(prev['data'])))
+        prev = frame
+    # lost the last frame, whatever, too lazy to invent a duration
+
+    return timed_cqts
 
 class Dataset(object):
 
@@ -122,26 +192,26 @@ class InMemoryDataset(Dataset):
     def single_batch(self, steps, hop):
         return self.next_batch(steps, hop, self.num_batches(steps, hop))
 
-def align(segments, spans, average=False):
+def align(beats, spans, average=False):
     aligned = []
     i = 0
     if average:
         default = np.zeros(len(spans[0].data))
 
-    for si, segment in enumerate(segments):
-        segment_spans = []
-        while i < len(spans) and spans[i].start < segment.end:
+    for si, beat in enumerate(beats):
+        beat_spans = []
+        while i < len(spans) and spans[i].start < beat.end:
             span = spans[i]
-            span_length = min(segment.end, span.end) - max(segment.start, span.start)
-            segment_spans.append((span_length, span.data))
+            span_length = min(beat.end, span.end) - max(beat.start, span.start)
+            beat_spans.append((span_length, span.data))
             i += 1
 
         i -= 1
 
         aligned_data = default.copy() if average else None
         max_length = 0
-        total_length = segment.end - segment.start
-        for length, data in segment_spans:
+        total_length = beat.end - beat.start
+        for length, data in beat_spans:
             if average:
                 aligned_data += (data * float(length) / total_length)
             else:
@@ -151,11 +221,11 @@ def align(segments, spans, average=False):
 
         aligned.append(aligned_data)
 
-        if i == len(spans) - 1 and si < len(segments) - 1 and spans[i].end < segments[si + 1].start:
-            segments = segments[:si + 1]
+        if i == len(spans) - 1 and si < len(beats) - 1 and spans[i].end < beats[si + 1].start:
+            beats = beats[:si + 1]
             break
 
-    return segments, aligned
+    return aligned, beats
 
 def test_align():
 
@@ -237,3 +307,4 @@ def one_hot_encode(labels, num_labels):
     encoded = np.zeros((len(labels), num_labels))
     encoded[np.arange(len(labels)), labels] = 1
     return encoded
+

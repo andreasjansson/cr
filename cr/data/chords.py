@@ -141,6 +141,7 @@ ANDREAS_TO_MAJMIN = {
 }
 
 FULL_TO_ANDREAS = OrderedDict([
+    ('',          ''),
     ('maj',       ''),
     ('min',       'min'),
     ('7',         '7'),
@@ -174,6 +175,7 @@ FULL_TO_ANDREAS = OrderedDict([
     ('maj6(9)',   '6'),
     ('sus2',      'add9'),
     ('dim',       'dim'),
+    ('dim7',      'dim'),
     ('maj/7',     '7'),
     ('min7/5',    'min7'),
     ('7/3',       '7'),
@@ -181,6 +183,9 @@ FULL_TO_ANDREAS = OrderedDict([
     ('hdim7',     'dim'),
     ('sus4(9)',   'sus4'),
     ('aug(b7)',   'aug'),
+    ('aug',       'aug'),
+    ('minmaj',    'min'),
+    ('minmaj7',   'min'),
 ])
 
 NOTES = {
@@ -233,6 +238,10 @@ CHORD_REGEX = re.compile(
     '$'
 )
 
+def full_to_majmin(full):
+    full = full.split('(')[0].split('/')[0]
+    return ANDREAS_TO_MAJMIN[FULL_TO_ANDREAS[full]]
+
 def get_chord_info(chord):
     match = CHORD_REGEX.match(chord.lower())
     root = bass_root = NOTES_LOWER[match.group('root')] % 12
@@ -270,7 +279,15 @@ class Chord(object):
 
     @staticmethod
     def from_string(s):
-        root, _, quality = s.partition(':')
+        if ':' not in s and '/' in s:
+            # handle "D/5" etc
+            root, quality = s.split('/')
+            quality = '/' + quality
+        else:
+            root, _, quality = s.partition(':')
+        quality = full_to_majmin(quality) # TODO: ability to have larger vocabulary
+        if quality == '':
+            quality = 'maj'
         if root == 'N':
             chord = Chord(None, NO_CHORD)
         elif root == 'X':
@@ -279,7 +296,6 @@ class Chord(object):
             root = note_to_midi(root) % 12
             chord = Chord(root, quality)
         return chord
-
 
     @staticmethod
     def from_number(x):
