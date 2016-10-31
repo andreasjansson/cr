@@ -60,28 +60,36 @@ def partition_track_ids(track_ids, conf):
         partitioned.append((name, track_ids[start:end]))
     return partitioned
 
-# track_id1, lengths1, features1, labels1 = next(read_tfrecord_batched(expanduser('~/phd/cr/tf_records_tmp/train.tfrecords.proto'), 20))
+# track_id, lengths, features, labels = next(read_tfrecord_batched(expanduser('~/phd/cr/tf_records_tmp/train.tfrecords.proto'), 20))
 # sess.run(accuracy, feed_dict={features_batch: features1, labels_batch: labels1, length_batch: lengths1})
-def read_tfrecord_batched(filename, batch_size):
+def read_tfrecord_batched(filename, batch_size, return_segments=False):
     track_id_batch = []
     length_batch = []
     features_batch = []
     labels_batch = []
+    segments_batch = []
+
+    def batch(track_id_batch, length_batch, features_batch, labels_batch, segments_batch=None):
+        ret = [
+            np.array(track_id_batch, dtype=str),
+            np.array(length_batch, dtype=np.int64),
+            padded_array_3d(features_batch, dtype=np.float32),
+            padded_array_2d(labels_batch, dtype=np.float32),
+        ]
+        if return_segments:
+            ret.append(padded_array_2d(segments_batch, dtype=np.float32))
+        return tuple(ret)
 
     for serialized_example in tf.python_io.tf_record_iterator(filename):
 
         if len(length_batch) == batch_size:
-            yield (
-                np.array(track_id_batch, dtype=np.int64),
-                np.array(length_batch, dtype=np.int64),
-                padded_array_3d(features_batch, dtype=np.float32),
-                padded_array_2d(labels_batch, dtype=np.float32)
-            )
+            yield batch(track_id_batch, length_batch, features_batch, labels_batch, segments_batch)
 
             track_id_batch = []
             length_batch = []
             features_batch = []
             labels_batch = []
+            segments_batch = []
 
         example = tf.train.SequenceExample()
         example.ParseFromString(serialized_example)
@@ -93,13 +101,10 @@ def read_tfrecord_batched(filename, batch_size):
         length_batch.append(context['length'].int64_list.value[0])
         features_batch.append([f.float_list.value for f in lists['features'].feature])
         labels_batch.append([f.int64_list.value[0] for f in lists['labels'].feature])
+        if return_segments:
+            segments_batch.append([f.int64_list.value[0] for f in lists['segments'].feature])
 
-    yield (
-        np.array(track_id_batch, dtype=np.int64),
-        np.array(length_batch, dtype=np.int64),
-        padded_array_3d(features_batch, dtype=np.float32),
-        padded_array_2d(labels_batch, dtype=np.float32)
-    )
+    yield batch(track_id_batch, length_batch, features_batch, labels_batch, segments_batch)
 
 def padded_array_2d(arr, **kwargs):
     max_len = np.max([len(a) for a in arr])
@@ -115,36 +120,56 @@ def padded_array_3d(arr, **kwargs):
         padded[i, :len(a), :] = np.array(a)
     return padded
 
-def batches_from_queue(filename_queue, batch_size):
+def batches_from_queue(filename_queue, batch_size, return_segments=False):
     reader = tf.TFRecordReader()
     _, serialized_example = reader.read(filename_queue)
+
+    sequence_features = {
+        "features": tf.FixedLenSequenceFeature([84], dtype=tf.float32),
+        "labels": tf.FixedLenSequenceFeature([], dtype=tf.int64)
+    }
+    if return_segments:
+        sequence_features['segments'] = tf.FixedLenSequenceFeature([], dtype=tf.int64)
+
     context, sequence = tf.parse_single_sequence_example(
         serialized_example,
         context_features={
             "length": tf.FixedLenFeature([], dtype=tf.int64),
             "track_id": tf.FixedLenFeature([], dtype=tf.string, default_value='unknown')
         },
-        sequence_features={
-            "features": tf.FixedLenSequenceFeature([84], dtype=tf.float32),
-            "labels": tf.FixedLenSequenceFeature([], dtype=tf.int64)
-        })
+        sequence_features=sequence_features)
 
     min_after_dequeue = 10000
     capacity = min_after_dequeue + 3 * batch_size
-    track_id_batch, length_batch, features_batch, labels_batch = tf.train.batch(
-            [
-                context['track_id'],
-                context['length'],
-                sequence['features'],
-                sequence['labels']
-            ], 
-        batch_size=batch_size, 
-        capacity=capacity,
-        dynamic_pad=True,
-        #num_threads=4
-    )
+
+    if return_segments:
+        return tf.train.batch(
+                [
+                    context['track_id'],
+                    context['length'],
+                    sequence['features'],
+                    sequence['labels'],
+                    sequence['segments'],
+                ], 
+            batch_size=batch_size, 
+            capacity=capacity,
+            dynamic_pad=True,
+            #num_threads=4
+        )
+    else:
+        return tf.train.batch(
+                [
+                    context['track_id'],
+                    context['length'],
+                    sequence['features'],
+                    sequence['labels'],
+                ], 
+            batch_size=batch_size, 
+            capacity=capacity,
+            dynamic_pad=True,
+            #num_threads=4
+        )
     
-    return track_id_batch, length_batch, features_batch, labels_batch
 # write_billboard(expanduser('~/phd/data/billboard'), expanduser('~/phd/cr/tf_records/billboard'))
 def write_billboard(billboard_path, output_path, max_records=None):
     feature_reader = BillboardCQTReader(billboard_path, half_beats=False)
