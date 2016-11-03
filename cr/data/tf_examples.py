@@ -60,9 +60,9 @@ def partition_track_ids(track_ids, conf):
         partitioned.append((name, track_ids[start:end]))
     return partitioned
 
-# track_id, lengths, features, labels = next(read_tfrecord_batched(expanduser('~/phd/cr/tf_records_tmp/train.tfrecords.proto'), 20))
+# track_ids, lengths, features, labels, segments = next(read_tfrecord_batched(expanduser('~/phd/cr/tf_records_tmp/train.tfrecords.proto'), 20), True)
 # sess.run(accuracy, feed_dict={features_batch: features1, labels_batch: labels1, length_batch: lengths1})
-def read_tfrecord_batched(filename, batch_size, return_segments=False):
+def read_tfrecord_batched(filename_or_filenames, batch_size, return_segments=False):
     track_id_batch = []
     length_batch = []
     features_batch = []
@@ -80,29 +80,35 @@ def read_tfrecord_batched(filename, batch_size, return_segments=False):
             ret.append(padded_array_2d(segments_batch, dtype=np.float32))
         return tuple(ret)
 
-    for serialized_example in tf.python_io.tf_record_iterator(filename):
+    if type(filename_or_filenames) is list:
+        filenames = filename_or_filenames
+    else:
+        filenames = [filename]
 
-        if len(length_batch) == batch_size:
-            yield batch(track_id_batch, length_batch, features_batch, labels_batch, segments_batch)
+    for filename in filenames:
+        for serialized_example in tf.python_io.tf_record_iterator(filename):
 
-            track_id_batch = []
-            length_batch = []
-            features_batch = []
-            labels_batch = []
-            segments_batch = []
+            if len(length_batch) == batch_size:
+                yield batch(track_id_batch, length_batch, features_batch, labels_batch, segments_batch)
 
-        example = tf.train.SequenceExample()
-        example.ParseFromString(serialized_example)
+                track_id_batch = []
+                length_batch = []
+                features_batch = []
+                labels_batch = []
+                segments_batch = []
 
-        context = example.context.feature
-        lists = example.feature_lists.feature_list
+            example = tf.train.SequenceExample()
+            example.ParseFromString(serialized_example)
 
-        track_id_batch.append(context['track_id'].bytes_list.value[0])
-        length_batch.append(context['length'].int64_list.value[0])
-        features_batch.append([f.float_list.value for f in lists['features'].feature])
-        labels_batch.append([f.int64_list.value[0] for f in lists['labels'].feature])
-        if return_segments:
-            segments_batch.append([f.int64_list.value[0] for f in lists['segments'].feature])
+            context = example.context.feature
+            lists = example.feature_lists.feature_list
+
+            track_id_batch.append(context['track_id'].bytes_list.value[0])
+            length_batch.append(context['length'].int64_list.value[0])
+            features_batch.append([f.float_list.value for f in lists['features'].feature])
+            labels_batch.append([f.int64_list.value[0] for f in lists['labels'].feature])
+            if return_segments:
+                segments_batch.append([f.int64_list.value[0] for f in lists['segments'].feature])
 
     yield batch(track_id_batch, length_batch, features_batch, labels_batch, segments_batch)
 
