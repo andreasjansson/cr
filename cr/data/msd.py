@@ -1,12 +1,17 @@
+import string
+import numpy as np
+import multiprocessing
 from glob import glob
 import os
 import cPickle
 from collections import defaultdict
 import re
 import h5py
-import Levenshtein
 
-from util import fuzzy
+from cr.common.util import fuzzy
+
+from cr.data.datatypes import TimedData, Beat
+from cr.data.align import align
 
 # from datasets import (
 #     OnDiskDataset,
@@ -83,6 +88,9 @@ def match_indices(msd, k400):
     return matches
 
 def find_match(key, artist2k400):
+    import Levenshtein
+
+
     a1, t1 = key
     if a1 not in artist2k400:
         return None
@@ -113,13 +121,64 @@ def write_matches(matches, msd, k400, name_index):
             for path in k400[k2]:
                 f.write('%s\t%s\t%s\n' % (msd[k1], path, name_index[k1]))
 
-
 def read_msd_file(path):
     with h5py.File(path) as f:
         chromagram = f['analysis']['segments_pitches'].value
         segments_start = f['analysis']['segments_start'].value
         beats_start = f['analysis']['beats_start'].value
+
     return chromagram, segments_start, beats_start
+
+def read_and_align_msd_chromagram(path):
+    with h5py.File(path) as f:
+        chromagram = f['analysis']['segments_pitches'].value
+        segments_start = f['analysis']['segments_start'].value
+        beats_start = f['analysis']['beats_start'].value
+
+    timed_chromagram = ([TimedData(start, end, chroma) for chroma, start, end
+                         in zip(chromagram[:-1], segments_start[:-1], segments_start[1:])])
+    beats = [Beat(start, end) for start, end
+             in zip(beats_start[:-1], beats_start[1:])]
+    aligned_chromagram, _ = align(beats, timed_chromagram)
+    return np.array(aligned_chromagram).astype(np.float32)
+
+# while true; do fab rsync_up:$HOME/phd/cr/cr,"~/"; sleep 1; done
+# PYTHONPATH=. python cr/data/msd.py
+def extract_all_aligned_chromagrams():
+    indir = '/mnt/msd/data'
+    #indir = '/mnt/data/data'
+    outdir = '/mnt/output'
+
+    pool = multiprocessing.Pool(128)
+
+    for l1 in string.ascii_uppercase:
+        for l2 in string.ascii_uppercase:
+            print '%s - %s' % (l1, l2)
+
+            # temporary
+            if l1 < 'S' or l1 == 'S' and l2 < 'W':
+                continue
+
+            for l3 in string.ascii_uppercase:
+                cur_indir = '%s/%s/%s/%s' % (indir, l1, l2, l3)
+                if not os.path.exists(cur_indir):
+                    continue
+
+                cur_outdir = '%s/%s/%s/%s' % (outdir, l1, l2, l3)
+
+                if os.path.exists(cur_outdir):
+                    continue
+
+                os.makedirs(cur_outdir)
+
+                args = [(f, '%s/%s' % (cur_outdir, os.path.basename(f).replace('.h5', '.npy')))
+                         for f in glob('%s/*.h5' % cur_indir)]
+                pool.map(write_aligned_chromagram, args)
+
+def write_aligned_chromagram(args):
+    inpath, outpath = args
+    aligned_chromagram = read_and_align_msd_chromagram(inpath)
+    np.save(outpath, aligned_chromagram)
 
 def extract_all_chromagrams():
     with open('/mnt2/data/msd_400k_chroma/msd_match.tsv') as f:
@@ -140,4 +199,5 @@ def extract_all_chromagrams():
                              protocol=cPickle.HIGHEST_PROTOCOL)
 
 if __name__ == '__main__':
-    extract_all_chromagrams()
+    #extract_all_chromagrams()
+    extract_all_aligned_chromagrams()

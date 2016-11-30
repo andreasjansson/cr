@@ -20,6 +20,10 @@ class SegmentationModel(object):
         self.labels_batch = labels_batch
         self.segments_batch = segments_batch
 
+        # segment boundaries
+        self.segments_batch = tf.pad(
+            tf.sign((self.segments_batch[:, :-1] - self.segments_batch[:, 1:]) ** 2), [[0, 0], [1, 0]])
+
         self.features = tf.log(1 + (self.features_batch /
                                     tf.reduce_max(self.features_batch, (1, 2))[:, None, None]) *
                                tf.to_float(self.features_batch > 0))
@@ -28,8 +32,8 @@ class SegmentationModel(object):
         self.labels_one_hot = tf.one_hot(labels_batch, 26)
         self.labels_one_hot_flat = tf.reshape(self.labels_one_hot, [-1, 26])
 
-        self.segments_flat = tf.reshape(segments_batch, [-1])
-        self.segments_one_hot = tf.one_hot(segments_batch, 8)
+        self.segments_flat = tf.reshape(self.segments_batch, [-1])
+        self.segments_one_hot = tf.one_hot(self.segments_batch, 8)
         self.segments_one_hot_flat = tf.reshape(self.segments_one_hot, [-1, 8])
 
         self.lstm1 = tf.nn.rnn_cell.GRUCell(rnn_size)
@@ -64,8 +68,8 @@ class SegmentationModel(object):
             self.chord_outputs, self.labels_one_hot_flat) * self.mask
 
         self.mean_loss = (
-            tf.reduce_sum(self.segment_losses) +
-            tf.reduce_sum(self.chord_losses)
+            tf.reduce_sum(self.segment_losses)**2 +
+            tf.reduce_sum(self.chord_losses)**2
         ) / tf.reduce_sum(self.mask)
 
         self.chord_predictions = tf.argmax(self.chord_outputs, 1)

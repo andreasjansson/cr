@@ -1,7 +1,7 @@
 import re
 import numpy as np
 import os
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 
 if 'Chord' not in globals():
     from cr.data.chords import Chord
